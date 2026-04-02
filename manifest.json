@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Save Image As",
+  "description": "Right-click any image and save it as PNG, JPG, or WebP.",
+  "version": "1.0.0",
+  "permissions": [
+    "contextMenus",
+    "downloads",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Save Image As",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html"
+}

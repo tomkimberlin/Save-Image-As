@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Save Image As Settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="page">
+      <section class="panel">
+        <h1>Save Image As</h1>
+        <p class="lede">
+          Choose how converted downloads behave. PNG is always lossless, while JPG and WebP use the quality levels below.
+        </p>
+
+        <form id="settings-form" class="settings-form">
+          <label class="field">
+            <span>JPG quality</span>
+            <input id="jpeg-quality" name="jpeg-quality" type="range" min="0.1" max="1" step="0.01">
+            <output id="jpeg-quality-value" for="jpeg-quality"></output>
+          </label>
+
+          <label class="field">
+            <span>WebP quality</span>
+            <input id="webp-quality" name="webp-quality" type="range" min="0.1" max="1" step="0.01">
+            <output id="webp-quality-value" for="webp-quality"></output>
+          </label>
+
+          <label class="checkbox-field">
+            <input id="save-as-dialog" name="save-as-dialog" type="checkbox">
+            <span>Show Chrome's Save As dialog before downloading</span>
+          </label>
+
+          <div class="actions">
+            <button type="submit">Save settings</button>
+            <button id="reset-button" type="button" class="secondary">Reset defaults</button>
+          </div>
+        </form>
+
+        <p id="status" class="status" aria-live="polite"></p>
+      </section>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+  </html>

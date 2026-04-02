@@ -1,0 +1,49 @@
+:root {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    linear-gradient(135deg, #113f67, #1c5d99 60%, #f1c40f 160%);
+  color: #f7fbff;
+}
+
+.popup {
+  padding: 18px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.72rem;
+  opacity: 0.82;
+}
+
+h1 {
+  margin: 0 0 10px;
+  font-size: 1.55rem;
+}
+
+.body {
+  margin: 0 0 18px;
+  line-height: 1.45;
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 16px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  color: #13314d;
+  background: #f6d365;
+}
+
+button:hover {
+  background: #ffe08a;
+}
