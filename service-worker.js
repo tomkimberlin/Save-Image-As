@@ -432,39 +432,66 @@ async function downloadBlob(blob, filename, saveAsDialog) {
     throw new Error('The converted image could not be prepared for download.');
   }
 
-  const objectUrl = URL.createObjectURL(blob);
+  const downloadUrl = await createDownloadUrl(blob);
   let downloadId;
 
   try {
     downloadId = await extensionApi.downloads.download({
-      url: objectUrl,
+      url: downloadUrl,
       filename,
       saveAs: saveAsDialog,
       conflictAction: 'uniquify'
     });
   } catch (error) {
-    URL.revokeObjectURL(objectUrl);
+    revokeDownloadUrl(downloadUrl);
     throw error;
   }
 
-  if (typeof downloadId === 'number') {
-    pendingObjectUrls.set(downloadId, objectUrl);
+  if (typeof downloadId === 'number' && downloadUrl.startsWith('blob:')) {
+    pendingObjectUrls.set(downloadId, downloadUrl);
     return;
   }
 
-  setTimeout(() => {
-    URL.revokeObjectURL(objectUrl);
-  }, 60_000);
+  if (downloadUrl.startsWith('blob:')) {
+    setTimeout(() => {
+      revokeDownloadUrl(downloadUrl);
+    }, 60_000);
+  }
 }
 
 function revokePendingObjectUrl(downloadId) {
-  const objectUrl = pendingObjectUrls.get(downloadId);
-  if (!objectUrl) {
+  const downloadUrl = pendingObjectUrls.get(downloadId);
+  if (!downloadUrl) {
     return;
   }
 
   pendingObjectUrls.delete(downloadId);
-  URL.revokeObjectURL(objectUrl);
+  revokeDownloadUrl(downloadUrl);
+}
+
+async function createDownloadUrl(blob) {
+  if (typeof URL.createObjectURL === 'function' && typeof URL.revokeObjectURL === 'function') {
+    return URL.createObjectURL(blob);
+  }
+
+  return await blobToDataUrl(blob);
+}
+
+function revokeDownloadUrl(downloadUrl) {
+  if (typeof downloadUrl !== 'string' || !downloadUrl.startsWith('blob:')) {
+    return;
+  }
+
+  URL.revokeObjectURL(downloadUrl);
+}
+
+async function blobToDataUrl(blob) {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Unable to read the converted image.'));
+    reader.readAsDataURL(blob);
+  });
 }
 
 function buildFilenameBase(srcUrl, pageUrl) {
