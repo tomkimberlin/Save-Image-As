@@ -1,3 +1,5 @@
+const extensionApi = globalThis.browser ?? globalThis.chrome;
+
 const DEFAULT_SETTINGS = {
   jpegQuality: 0.92,
   webpQuality: 0.9,
@@ -22,7 +24,7 @@ init().catch((error) => {
 
 async function init() {
   bindEvents();
-  const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+  const settings = await extensionApi.storage.sync.get(DEFAULT_SETTINGS);
   hydrateForm(settings);
 }
 
@@ -42,7 +44,7 @@ function bindEvents() {
 
   elements.resetButton.addEventListener('click', async () => {
     hydrateForm(DEFAULT_SETTINGS);
-    await chrome.storage.sync.set(DEFAULT_SETTINGS);
+    await extensionApi.storage.sync.set(DEFAULT_SETTINGS);
     setStatus('Settings reset to defaults.');
   });
 }
@@ -66,7 +68,7 @@ async function saveSettings() {
     saveAsDialog: elements.saveAsDialog.checked
   };
 
-  await chrome.storage.sync.set(nextSettings);
+  await extensionApi.storage.sync.set(nextSettings);
   setStatus('Settings saved.');
 }
 
