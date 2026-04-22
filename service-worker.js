@@ -1,3 +1,5 @@
+const extensionApi = globalThis.browser ?? globalThis.chrome;
+
 const ROOT_MENU_ID = 'save-image-as-root';
 const MENU_PREFIX = 'save-image-as:';
 
@@ -28,15 +30,17 @@ const DEFAULT_SETTINGS = {
   saveAsDialog: true
 };
 
-chrome.runtime.onInstalled.addListener(async () => {
+const pendingObjectUrls = new Map();
+
+extensionApi.runtime.onInstalled.addListener(async () => {
   await createContextMenus();
 });
 
-chrome.runtime.onStartup.addListener(async () => {
+extensionApi.runtime.onStartup.addListener(async () => {
   await createContextMenus();
 });
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
   const formatId = getFormatIdFromMenu(info.menuItemId);
   if (!formatId || !info.srcUrl) {
     return;
@@ -56,17 +60,27 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-async function createContextMenus() {
-  await chrome.contextMenus.removeAll();
+extensionApi.downloads.onChanged.addListener((delta) => {
+  if (!delta || typeof delta.id !== 'number') {
+    return;
+  }
 
-  chrome.contextMenus.create({
+  if (delta.state?.current === 'complete' || delta.state?.current === 'interrupted') {
+    revokePendingObjectUrl(delta.id);
+  }
+});
+
+async function createContextMenus() {
+  await extensionApi.contextMenus.removeAll();
+
+  extensionApi.contextMenus.create({
     id: ROOT_MENU_ID,
     title: 'Save image as',
     contexts: ['image']
   });
 
   for (const format of Object.values(FORMATS)) {
-    chrome.contextMenus.create({
+    extensionApi.contextMenus.create({
       id: `${MENU_PREFIX}${format.id}`,
       parentId: ROOT_MENU_ID,
       title: format.label,
@@ -108,8 +122,8 @@ async function handleImageSave({ formatId, frameId, pageUrl, srcUrl, tab }) {
   }
 
   try {
-    const dataUrl = await convertRemoteImage(srcUrl, format, quality);
-    await downloadDataUrl(dataUrl, filename, settings.saveAsDialog);
+    const convertedBlob = await convertRemoteImage(srcUrl, format, quality);
+    await downloadBlob(convertedBlob, filename, settings.saveAsDialog);
   } catch (error) {
     console.warn('Worker-side conversion failed, attempting page fallback.', error);
     await saveFromPageContext({
@@ -125,7 +139,7 @@ async function handleImageSave({ formatId, frameId, pageUrl, srcUrl, tab }) {
 }
 
 async function getSettings() {
-  const values = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+  const values = await extensionApi.storage.sync.get(DEFAULT_SETTINGS);
   return {
     jpegQuality: normalizeQuality(values.jpegQuality, DEFAULT_SETTINGS.jpegQuality),
     webpQuality: normalizeQuality(values.webpQuality, DEFAULT_SETTINGS.webpQuality),
@@ -159,6 +173,10 @@ async function convertRemoteImage(srcUrl, format, quality) {
     throw new Error('The source image is empty.');
   }
 
+  if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+    return await convertBlobWithDocumentCanvas(sourceBlob, format, quality);
+  }
+
   const imageBitmap = await createImageBitmap(sourceBlob);
 
   try {
@@ -178,15 +196,68 @@ async function convertRemoteImage(srcUrl, format, quality) {
 
     context.drawImage(imageBitmap, 0, 0);
 
-    const convertedBlob = await canvas.convertToBlob({
+    return await canvas.convertToBlob({
       type: format.mimeType,
       quality
     });
-
-    return await blobToDataUrl(convertedBlob);
   } finally {
     imageBitmap.close();
   }
+}
+
+async function convertBlobWithDocumentCanvas(sourceBlob, format, quality) {
+  const objectUrl = URL.createObjectURL(sourceBlob);
+
+  try {
+    const image = await loadImageElement(objectUrl);
+    const width = image.naturalWidth || image.width;
+    const height = image.naturalHeight || image.height;
+
+    if (!width || !height) {
+      throw new Error('The source image has no drawable size.');
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+
+    const context = canvas.getContext('2d', {
+      alpha: format.mimeType !== 'image/jpeg'
+    });
+
+    if (!context) {
+      throw new Error('Unable to create a 2D drawing context.');
+    }
+
+    if (format.mimeType === 'image/jpeg') {
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    context.drawImage(image, 0, 0, width, height);
+
+    return await new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          reject(new Error(`The browser could not encode ${format.label}.`));
+          return;
+        }
+
+        resolve(blob);
+      }, format.mimeType, quality);
+    });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function loadImageElement(src) {
+  return await new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('The source image could not be decoded.'));
+    image.src = src;
+  });
 }
 
 async function saveFromPageContext({ filename, format, frameId, quality, saveAsDialog, srcUrl, tabId }) {
@@ -199,7 +270,7 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
     target.frameIds = [frameId];
   }
 
-  const injectionResults = await chrome.scripting.executeScript({
+  const injectionResults = await extensionApi.scripting.executeScript({
     target,
     func: async ({ fallbackFilename, fallbackQuality, fallbackSrcUrl, formatSpec }) => {
       try {
@@ -286,16 +357,11 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
           };
         }
 
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error('Unable to read the converted image.'));
-          reader.readAsDataURL(convertedBlob);
-        });
+        const arrayBuffer = await convertedBlob.arrayBuffer();
 
         return {
           ok: true,
-          dataUrl,
+          bytes: Array.from(new Uint8Array(arrayBuffer)),
           filename: fallbackFilename
         };
       } catch (error) {
@@ -320,7 +386,15 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
     throw new Error(`Page fallback failed: ${result?.error || 'Unknown page error.'}`);
   }
 
-  await downloadDataUrl(result.dataUrl, filename, saveAsDialog);
+  if (!Array.isArray(result.bytes) || result.bytes.length === 0) {
+    throw new Error('Page fallback failed to produce image data.');
+  }
+
+  const convertedBlob = new Blob([new Uint8Array(result.bytes)], {
+    type: format.mimeType
+  });
+
+  await downloadBlob(convertedBlob, filename, saveAsDialog);
 }
 
 async function showFailureBadge(tabId, message) {
@@ -328,51 +402,69 @@ async function showFailureBadge(tabId, message) {
     return;
   }
 
-  await chrome.action.setBadgeBackgroundColor({
+  await extensionApi.action.setBadgeBackgroundColor({
     tabId,
     color: '#b42318'
   });
-  await chrome.action.setBadgeText({
+  await extensionApi.action.setBadgeText({
     tabId,
     text: '!'
   });
-  await chrome.action.setTitle({
+  await extensionApi.action.setTitle({
     tabId,
     title: `Save Image As: ${message}`
   });
 
   setTimeout(async () => {
-    await chrome.action.setBadgeText({
+    await extensionApi.action.setBadgeText({
       tabId,
       text: ''
     });
-    await chrome.action.setTitle({
+    await extensionApi.action.setTitle({
       tabId,
       title: 'Save Image As'
     });
   }, 5000);
 }
 
-async function downloadDataUrl(dataUrl, filename, saveAsDialog) {
-  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+async function downloadBlob(blob, filename, saveAsDialog) {
+  if (!(blob instanceof Blob) || !blob.size) {
     throw new Error('The converted image could not be prepared for download.');
   }
 
-  await chrome.downloads.download({
-    url: dataUrl,
-    filename,
-    saveAs: saveAsDialog,
-    conflictAction: 'uniquify'
-  });
+  const objectUrl = URL.createObjectURL(blob);
+  let downloadId;
+
+  try {
+    downloadId = await extensionApi.downloads.download({
+      url: objectUrl,
+      filename,
+      saveAs: saveAsDialog,
+      conflictAction: 'uniquify'
+    });
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+
+  if (typeof downloadId === 'number') {
+    pendingObjectUrls.set(downloadId, objectUrl);
+    return;
+  }
+
+  setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 60_000);
 }
 
-async function blobToDataUrl(blob) {
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error('Unable to read the converted image.'));
-    reader.readAsDataURL(blob);
-  });
+function revokePendingObjectUrl(downloadId) {
+  const objectUrl = pendingObjectUrls.get(downloadId);
+  if (!objectUrl) {
+    return;
+  }
+
+  pendingObjectUrls.delete(downloadId);
+  URL.revokeObjectURL(objectUrl);
 }
 
 function buildFilenameBase(srcUrl, pageUrl) {
