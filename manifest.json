@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Save Image As",
   "description": "Right-click any image and save it as PNG, JPG, or WebP.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "permissions": [
     "contextMenus",
     "downloads",
@@ -13,12 +13,25 @@
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "service-worker.js",
-    "type": "module"
+    "scripts": [
+      "service-worker.js"
+    ],
+    "service_worker": "service-worker.js"
   },
   "action": {
     "default_title": "Save Image As",
     "default_popup": "popup.html"
   },
-  "options_page": "options.html"
+  "options_page": "options.html",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "save-image-as@tomkimberlin.addons",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      },
+      "strict_min_version": "121.0"
+    }
+  }
 }
