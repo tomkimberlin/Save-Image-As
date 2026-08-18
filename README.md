@@ -42,6 +42,12 @@ The extension includes an options page for:
 - `service-worker.js`: context menu, conversion, fallback, and download logic
 - `options.html`, `options.css`, `options.js`: settings UI and persistence
 - `popup.html`, `popup.css`, `popup.js`: lightweight extension popup
+- `icons/`: toolbar and extension-management icons
+
+## Browser Support
+
+- Chrome and Chromium-based browsers 121 or later
+- Firefox for desktop 140 or later
 
 ## Development
 
@@ -53,6 +59,15 @@ The project is built as a plain Manifest V3 extension with no bundler or framewo
 - `browser.scripting` / `chrome.scripting`
 - `createImageBitmap`
 - `OffscreenCanvas`
+
+For a quick source validation pass:
+
+```sh
+node --check service-worker.js
+node --check options.js
+node --check popup.js
+npx --yes web-ext@10.6.0 lint --source-dir .
+```
 
 ## Local Install
 
@@ -71,6 +86,7 @@ The project is built as a plain Manifest V3 extension with no bundler or framewo
 
 ## Packaging
 
+- Run `npx --yes web-ext@10.6.0 build --source-dir .` to create a distribution archive in `web-ext-artifacts/`.
 - Keep `dist/` and generated archives out of git. The repository already ignores packaged `.zip` files.
 - For Firefox distribution, keep a stable `browser_specific_settings.gecko.id` in `manifest.json`.
 - Package only the extension files that ship to the browser: `manifest.json`, scripts, HTML, CSS, icons/assets, and license/readme files if desired.
@@ -92,6 +108,8 @@ Recommended manual checks:
 ## Privacy
 
 Image conversion happens locally in the browser. The extension does not require a backend service or external processing pipeline.
+
+The extension requests access to all page URLs because selected images are often hosted on a different origin from the page displaying them. It uses that access only after the user chooses one of its image context-menu commands: first to fetch the selected image and, when necessary, to run the page-context fallback. The remaining permissions provide the context menu, converted-file download, and synchronized settings.
 
 ## Limitations
 

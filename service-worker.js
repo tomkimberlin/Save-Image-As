@@ -32,32 +32,35 @@ const DEFAULT_SETTINGS = {
 
 const pendingObjectUrls = new Map();
 
-extensionApi.runtime.onInstalled.addListener(async () => {
-  await createContextMenus();
+extensionApi.runtime.onInstalled.addListener(() => {
+  rebuildContextMenus();
 });
 
-extensionApi.runtime.onStartup.addListener(async () => {
-  await createContextMenus();
+extensionApi.runtime.onStartup.addListener(() => {
+  rebuildContextMenus();
 });
 
-extensionApi.contextMenus.onClicked.addListener(async (info, tab) => {
+extensionApi.contextMenus.onClicked.addListener((info, tab) => {
   const formatId = getFormatIdFromMenu(info.menuItemId);
   if (!formatId || !info.srcUrl) {
     return;
   }
 
-  try {
-    await handleImageSave({
-      formatId,
-      frameId: info.frameId,
-      pageUrl: info.pageUrl,
-      srcUrl: info.srcUrl,
-      tab
-    });
-  } catch (error) {
+  void handleImageSave({
+    formatId,
+    frameId: info.frameId,
+    pageUrl: info.pageUrl,
+    srcUrl: info.srcUrl,
+    tab
+  }).catch(async (error) => {
     console.error('Save Image As failed.', error);
-    await showFailureBadge(tab?.id, error?.message || 'Unable to save this image');
-  }
+
+    try {
+      await showFailureBadge(tab?.id, error?.message || 'Unable to save this image');
+    } catch (badgeError) {
+      console.warn('Unable to show the Save Image As failure badge.', badgeError);
+    }
+  });
 });
 
 extensionApi.downloads.onChanged.addListener((delta) => {
@@ -87,6 +90,12 @@ async function createContextMenus() {
       contexts: ['image']
     });
   }
+}
+
+function rebuildContextMenus() {
+  void createContextMenus().catch((error) => {
+    console.error('Unable to create Save Image As context menus.', error);
+  });
 }
 
 function getFormatIdFromMenu(menuItemId) {
@@ -143,7 +152,7 @@ async function getSettings() {
   return {
     jpegQuality: normalizeQuality(values.jpegQuality, DEFAULT_SETTINGS.jpegQuality),
     webpQuality: normalizeQuality(values.webpQuality, DEFAULT_SETTINGS.webpQuality),
-    saveAsDialog: Boolean(values.saveAsDialog)
+    saveAsDialog: normalizeBoolean(values.saveAsDialog, DEFAULT_SETTINGS.saveAsDialog)
   };
 }
 
@@ -272,43 +281,33 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
 
   const injectionResults = await extensionApi.scripting.executeScript({
     target,
-    func: async ({ fallbackFilename, fallbackQuality, fallbackSrcUrl, formatSpec }) => {
+    func: async ({ fallbackQuality, fallbackSrcUrl, formatSpec }) => {
       try {
-        const collectImages = (root, results) => {
-          const scope = root instanceof Document || root instanceof ShadowRoot ? root : document;
-
-          for (const image of scope.querySelectorAll('img')) {
-            results.push(image);
-          }
-
-          for (const element of scope.querySelectorAll('*')) {
-            if (element.shadowRoot) {
-              collectImages(element.shadowRoot, results);
+        const findMatchingImage = (root) => {
+          for (const image of root.querySelectorAll('img')) {
+            if (image.currentSrc === fallbackSrcUrl || image.src === fallbackSrcUrl) {
+              return image;
             }
           }
+
+          for (const element of root.querySelectorAll('*')) {
+            if (element.shadowRoot) {
+              const match = findMatchingImage(element.shadowRoot);
+              if (match) {
+                return match;
+              }
+            }
+          }
+
+          return null;
         };
 
-        const matchesSource = (imageUrl) => imageUrl === fallbackSrcUrl;
-        const images = [];
-        collectImages(document, images);
-
-        const match =
-          images.find((image) => matchesSource(image.currentSrc)) ||
-          images.find((image) => matchesSource(image.src));
+        const match = findMatchingImage(document);
 
         if (!match) {
           return {
             ok: false,
             error: 'No matching image element was found in the page.'
-          };
-        }
-
-        const width = match.naturalWidth || match.width;
-        const height = match.naturalHeight || match.height;
-        if (!width || !height) {
-          return {
-            ok: false,
-            error: 'The selected image has no drawable size.'
           };
         }
 
@@ -318,6 +317,15 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
           } catch {
             // Ignore decode failures and draw the already-visible image.
           }
+        }
+
+        const width = match.naturalWidth || match.width;
+        const height = match.naturalHeight || match.height;
+        if (!width || !height) {
+          return {
+            ok: false,
+            error: 'The selected image has no drawable size.'
+          };
         }
 
         const canvas = document.createElement('canvas');
@@ -357,12 +365,23 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
           };
         }
 
-        const arrayBuffer = await convertedBlob.arrayBuffer();
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (typeof reader.result === 'string' && reader.result.startsWith('data:')) {
+              resolve(reader.result);
+              return;
+            }
+
+            reject(new Error('The converted image could not be serialized.'));
+          };
+          reader.onerror = () => reject(new Error('The converted image could not be read.'));
+          reader.readAsDataURL(convertedBlob);
+        });
 
         return {
           ok: true,
-          bytes: Array.from(new Uint8Array(arrayBuffer)),
-          filename: fallbackFilename
+          dataUrl
         };
       } catch (error) {
         return {
@@ -373,7 +392,6 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
     },
     args: [
       {
-        fallbackFilename: filename,
         fallbackQuality: quality,
         fallbackSrcUrl: srcUrl,
         formatSpec: format
@@ -386,15 +404,14 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
     throw new Error(`Page fallback failed: ${result?.error || 'Unknown page error.'}`);
   }
 
-  if (!Array.isArray(result.bytes) || result.bytes.length === 0) {
+  if (
+    typeof result.dataUrl !== 'string' ||
+    !result.dataUrl.startsWith(`data:${format.mimeType}`)
+  ) {
     throw new Error('Page fallback failed to produce image data.');
   }
 
-  const convertedBlob = new Blob([new Uint8Array(result.bytes)], {
-    type: format.mimeType
-  });
-
-  await downloadBlob(convertedBlob, filename, saveAsDialog);
+  await startDownload(result.dataUrl, filename, saveAsDialog);
 }
 
 async function showFailureBadge(tabId, message) {
@@ -402,27 +419,33 @@ async function showFailureBadge(tabId, message) {
     return;
   }
 
-  await extensionApi.action.setBadgeBackgroundColor({
-    tabId,
-    color: '#b42318'
-  });
-  await extensionApi.action.setBadgeText({
-    tabId,
-    text: '!'
-  });
-  await extensionApi.action.setTitle({
-    tabId,
-    title: `Save Image As: ${message}`
-  });
+  await Promise.all([
+    extensionApi.action.setBadgeBackgroundColor({
+      tabId,
+      color: '#b42318'
+    }),
+    extensionApi.action.setBadgeText({
+      tabId,
+      text: '!'
+    }),
+    extensionApi.action.setTitle({
+      tabId,
+      title: `Save Image As: ${message}`
+    })
+  ]);
 
-  setTimeout(async () => {
-    await extensionApi.action.setBadgeText({
-      tabId,
-      text: ''
-    });
-    await extensionApi.action.setTitle({
-      tabId,
-      title: 'Save Image As'
+  setTimeout(() => {
+    void Promise.all([
+      extensionApi.action.setBadgeText({
+        tabId,
+        text: ''
+      }),
+      extensionApi.action.setTitle({
+        tabId,
+        title: 'Save Image As'
+      })
+    ]).catch(() => {
+      // The tab may have closed before the temporary badge was cleared.
     });
   }, 5000);
 }
@@ -433,6 +456,14 @@ async function downloadBlob(blob, filename, saveAsDialog) {
   }
 
   const downloadUrl = await createDownloadUrl(blob);
+  await startDownload(downloadUrl, filename, saveAsDialog);
+}
+
+async function startDownload(downloadUrl, filename, saveAsDialog) {
+  if (typeof downloadUrl !== 'string' || !/^(?:blob|data):/.test(downloadUrl)) {
+    throw new Error('The converted image did not produce a valid download URL.');
+  }
+
   let downloadId;
 
   try {
@@ -488,7 +519,14 @@ function revokeDownloadUrl(downloadUrl) {
 async function blobToDataUrl(blob) {
   return await new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result);
+    reader.onload = () => {
+      if (typeof reader.result === 'string' && reader.result.startsWith('data:')) {
+        resolve(reader.result);
+        return;
+      }
+
+      reject(new Error('The converted image could not be serialized.'));
+    };
     reader.onerror = () => reject(new Error('Unable to read the converted image.'));
     reader.readAsDataURL(blob);
   });
@@ -542,12 +580,18 @@ function removeExtension(filename) {
 }
 
 function sanitizeFilename(filename) {
-  return filename
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
+  const sanitized = filename
+    .replace(/[<>:"/\\|?*\p{Cc}]/gu, '-')
     .replace(/\s+/g, ' ')
-    .replace(/\.+$/g, '')
     .trim()
-    .slice(0, 180);
+    .slice(0, 180)
+    .replace(/[. ]+$/g, '');
+
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(sanitized)) {
+    return `_${sanitized}`;
+  }
+
+  return sanitized;
 }
 
 function normalizeQuality(value, fallback) {
@@ -557,6 +601,10 @@ function normalizeQuality(value, fallback) {
   }
 
   return Math.min(1, Math.max(0.1, numericValue));
+}
+
+function normalizeBoolean(value, fallback) {
+  return typeof value === 'boolean' ? value : fallback;
 }
 
 function isPageScopedUrl(url) {

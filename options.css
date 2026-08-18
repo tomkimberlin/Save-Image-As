@@ -61,7 +61,7 @@ h1 {
   gap: 8px;
 }
 
-.field span,
+.field label,
 .checkbox-field span {
   font-weight: 600;
 }
@@ -112,6 +112,12 @@ button:hover {
   transform: translateY(-1px);
 }
 
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid rgba(11, 110, 79, 0.35);
+  outline-offset: 3px;
+}
+
 button.secondary {
   background: #ebe6d8;
   color: var(--text);
@@ -126,4 +132,14 @@ button.secondary:hover {
   margin: 8px 0 0;
   color: var(--accent-dark);
   font-weight: 600;
+}
+
+.status.error {
+  color: #b42318;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button {
+    transition: none;
+  }
 }

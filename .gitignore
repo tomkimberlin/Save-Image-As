@@ -23,6 +23,7 @@ yarn-error.log*
 dist/
 build/
 out/
+web-ext-artifacts/
 *.zip
 
 # Node tooling
