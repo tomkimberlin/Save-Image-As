@@ -2,6 +2,7 @@ const extensionApi = globalThis.browser ?? globalThis.chrome;
 
 const ROOT_MENU_ID = 'save-image-as-root';
 const MENU_PREFIX = 'save-image-as:';
+const SUPPORTED_PAGE_PATTERNS = ['http://*/*', 'https://*/*', 'file:///*'];
 
 const FORMATS = {
   png: {
@@ -42,7 +43,7 @@ extensionApi.runtime.onStartup.addListener(() => {
 
 extensionApi.contextMenus.onClicked.addListener((info, tab) => {
   const formatId = getFormatIdFromMenu(info.menuItemId);
-  if (!formatId || !info.srcUrl) {
+  if (!formatId || !info.srcUrl || !isSupportedPageUrl(info.pageUrl)) {
     return;
   }
 
@@ -53,7 +54,7 @@ extensionApi.contextMenus.onClicked.addListener((info, tab) => {
     srcUrl: info.srcUrl,
     tab
   }).catch(async (error) => {
-    console.error('Save Image As failed.', error);
+    console.warn('Save Image As could not complete.', error);
 
     try {
       await showFailureBadge(tab?.id, error?.message || 'Unable to save this image');
@@ -79,7 +80,8 @@ async function createContextMenus() {
   extensionApi.contextMenus.create({
     id: ROOT_MENU_ID,
     title: 'Save image as',
-    contexts: ['image']
+    contexts: ['image'],
+    documentUrlPatterns: SUPPORTED_PAGE_PATTERNS
   });
 
   for (const format of Object.values(FORMATS)) {
@@ -87,7 +89,8 @@ async function createContextMenus() {
       id: `${MENU_PREFIX}${format.id}`,
       parentId: ROOT_MENU_ID,
       title: format.label,
-      contexts: ['image']
+      contexts: ['image'],
+      documentUrlPatterns: SUPPORTED_PAGE_PATTERNS
     });
   }
 }
@@ -609,4 +612,8 @@ function normalizeBoolean(value, fallback) {
 
 function isPageScopedUrl(url) {
   return typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('data:'));
+}
+
+function isSupportedPageUrl(url) {
+  return typeof url === 'string' && /^(?:https?|file):/.test(url);
 }

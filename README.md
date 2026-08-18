@@ -26,7 +26,7 @@ Formats such as GIF, TIFF, BMP, and AVIF are intentionally not included by defau
 
 ## How It Works
 
-The extension uses a cross-browser Manifest V3 background setup: Chromium browsers load `service-worker.js` as a service worker, while Firefox loads the same file through `background.scripts`. For standard image URLs, the extension fetches the source image and converts it inside the extension context before downloading the result. Chromium uses the worker-friendly `createImageBitmap` and `OffscreenCanvas` path, while Firefox uses a document-backed `<canvas>` path in its background page. For page-scoped sources such as some `blob:` and `data:` URLs, it falls back to page-context conversion when possible.
+The extension uses browser-specific Manifest V3 files so each browser receives only the background configuration it supports. Chromium browsers load `service-worker.js` as a service worker, while the prepared Firefox package loads the same file through `background.scripts`. For standard image URLs, the extension fetches the source image and converts it inside the extension context before downloading the result. Chromium uses the worker-friendly `createImageBitmap` and `OffscreenCanvas` path, while Firefox uses a document-backed `<canvas>` path in its background page. For page-scoped sources such as some `blob:` and `data:` URLs, it falls back to page-context conversion when possible.
 
 ## Settings
 
@@ -38,7 +38,9 @@ The extension includes an options page for:
 
 ## Project Structure
 
-- `manifest.json`: extension manifest and permissions
+- `manifest.json`: Chrome/Chromium manifest and permissions
+- `manifest.firefox.json`: Firefox-specific source manifest
+- `scripts/prepare-firefox.mjs`: dependency-free Firefox staging script
 - `service-worker.js`: context menu, conversion, fallback, and download logic
 - `options.html`, `options.css`, `options.js`: settings UI and persistence
 - `popup.html`, `popup.css`, `popup.js`: lightweight extension popup
@@ -66,16 +68,18 @@ For a quick source validation pass:
 node --check service-worker.js
 node --check options.js
 node --check popup.js
-npx --yes web-ext@10.6.0 lint --source-dir .
+node scripts/prepare-firefox.mjs
+npx --yes web-ext@10.6.0 lint --source-dir dist/firefox
 ```
 
 ## Local Install
 
 ### Firefox
 
-1. Open `about:debugging#/runtime/this-firefox`
-2. Click **Load Temporary Add-on**
-3. Select the project's `manifest.json`
+1. Run `node scripts/prepare-firefox.mjs`
+2. Open `about:debugging#/runtime/this-firefox`
+3. Click **Load Temporary Add-on**
+4. Select `dist/firefox/manifest.json`
 
 ### Chrome / Chromium
 
@@ -86,9 +90,9 @@ npx --yes web-ext@10.6.0 lint --source-dir .
 
 ## Packaging
 
-- Run `npx --yes web-ext@10.6.0 build --source-dir .` to create a distribution archive in `web-ext-artifacts/`.
+- Run `node scripts/prepare-firefox.mjs`, then `npx --yes web-ext@10.6.0 build --source-dir dist/firefox` to create a Firefox archive.
 - Keep `dist/` and generated archives out of git. The repository already ignores packaged `.zip` files.
-- For Firefox distribution, keep a stable `browser_specific_settings.gecko.id` in `manifest.json`.
+- For Firefox distribution, keep a stable `browser_specific_settings.gecko.id` in `manifest.firefox.json`.
 - Package only the extension files that ship to the browser: `manifest.json`, scripts, HTML, CSS, icons/assets, and license/readme files if desired.
 - Before publishing, reload the unpacked extension in both browsers and re-run the manual checks below.
 
