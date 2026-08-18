@@ -47,3 +47,8 @@ button {
 button:hover {
   background: #ffe08a;
 }
+
+button:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 3px;
+}

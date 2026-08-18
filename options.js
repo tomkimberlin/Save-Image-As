@@ -17,9 +17,11 @@ const elements = {
   status: document.getElementById('status')
 };
 
+let statusTimeoutId;
+
 init().catch((error) => {
   console.error('Unable to initialize settings page.', error);
-  setStatus('Unable to load settings.');
+  setStatus('Unable to load settings.', true);
 });
 
 async function init() {
@@ -37,22 +39,29 @@ function bindEvents() {
     updateQualityOutput(elements.webpQuality, elements.webpQualityValue);
   });
 
-  elements.form.addEventListener('submit', async (event) => {
+  elements.form.addEventListener('submit', (event) => {
     event.preventDefault();
-    await saveSettings();
+    void saveSettings().catch((error) => {
+      console.error('Unable to save settings.', error);
+      setStatus('Unable to save settings.', true);
+    });
   });
 
-  elements.resetButton.addEventListener('click', async () => {
-    hydrateForm(DEFAULT_SETTINGS);
-    await extensionApi.storage.sync.set(DEFAULT_SETTINGS);
-    setStatus('Settings reset to defaults.');
+  elements.resetButton.addEventListener('click', () => {
+    void resetSettings().catch((error) => {
+      console.error('Unable to reset settings.', error);
+      setStatus('Unable to reset settings.', true);
+    });
   });
 }
 
 function hydrateForm(settings) {
   elements.jpegQuality.value = normalizeQuality(settings.jpegQuality, DEFAULT_SETTINGS.jpegQuality);
   elements.webpQuality.value = normalizeQuality(settings.webpQuality, DEFAULT_SETTINGS.webpQuality);
-  elements.saveAsDialog.checked = Boolean(settings.saveAsDialog);
+  elements.saveAsDialog.checked = normalizeBoolean(
+    settings.saveAsDialog,
+    DEFAULT_SETTINGS.saveAsDialog
+  );
   updateQualityOutput(elements.jpegQuality, elements.jpegQualityValue);
   updateQualityOutput(elements.webpQuality, elements.webpQualityValue);
 }
@@ -72,6 +81,12 @@ async function saveSettings() {
   setStatus('Settings saved.');
 }
 
+async function resetSettings() {
+  await extensionApi.storage.sync.set(DEFAULT_SETTINGS);
+  hydrateForm(DEFAULT_SETTINGS);
+  setStatus('Settings reset to defaults.');
+}
+
 function normalizeQuality(value, fallback) {
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue)) {
@@ -81,10 +96,16 @@ function normalizeQuality(value, fallback) {
   return Math.min(1, Math.max(0.1, numericValue));
 }
 
-function setStatus(message) {
+function normalizeBoolean(value, fallback) {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function setStatus(message, isError = false) {
   elements.status.textContent = message;
-  window.clearTimeout(setStatus.timeoutId);
-  setStatus.timeoutId = window.setTimeout(() => {
+  elements.status.classList.toggle('error', isError);
+  window.clearTimeout(statusTimeoutId);
+  statusTimeoutId = window.setTimeout(() => {
     elements.status.textContent = '';
+    elements.status.classList.remove('error');
   }, 2200);
 }
