@@ -3,7 +3,6 @@
   "name": "Save Image As",
   "description": "Right-click any image and save it as PNG, JPG, or WebP.",
   "version": "1.1.0",
-  "minimum_chrome_version": "121",
   "permissions": [
     "contextMenus",
     "downloads",
@@ -14,7 +13,9 @@
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "service-worker.js"
+    "scripts": [
+      "service-worker.js"
+    ]
   },
   "icons": {
     "16": "icons/icon-16.png",
@@ -32,5 +33,19 @@
       "128": "icons/icon-128.png"
     }
   },
-  "options_page": "options.html"
+  "options_page": "options.html",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "save-image-as@tomkimberlin.addons",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      },
+      "strict_min_version": "140.0"
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
+    }
+  }
 }
