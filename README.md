@@ -1,6 +1,6 @@
 # Save Image As
 
-Save Image As is a Chrome and Firefox extension that adds a format-conversion option directly to the image context menu. Right-click an image, choose **Save image as**, and export a converted copy as PNG, JPG, or WebP.
+Save Image As is an open-source Chrome, Edge, and Firefox extension that adds format conversion directly to the image context menu. Right-click an image, choose **Save image as**, and export a converted copy as PNG, JPG, or WebP.
 
 ## What It Does
 
@@ -40,7 +40,8 @@ The extension includes an options page for:
 
 - `manifest.json`: Chrome/Chromium manifest and permissions
 - `manifest.firefox.json`: Firefox-specific source manifest
-- `scripts/prepare-firefox.mjs`: dependency-free Firefox staging script
+- `scripts/prepare-release.mjs`: dependency-free Chromium and Firefox staging script
+- `store-listing/`: reusable store copy, submission answers, reviewer notes, and listing artwork
 - `service-worker.js`: context menu, conversion, fallback, and download logic
 - `options.html`, `options.css`, `options.js`: settings UI and persistence
 - `popup.html`, `popup.css`, `popup.js`: lightweight extension popup
@@ -68,7 +69,7 @@ For a quick source validation pass:
 node --check service-worker.js
 node --check options.js
 node --check popup.js
-node scripts/prepare-firefox.mjs
+node scripts/prepare-release.mjs
 npx --yes web-ext@10.6.0 lint --source-dir dist/firefox
 ```
 
@@ -76,7 +77,7 @@ npx --yes web-ext@10.6.0 lint --source-dir dist/firefox
 
 ### Firefox
 
-1. Run `node scripts/prepare-firefox.mjs`
+1. Run `node scripts/prepare-release.mjs`
 2. Open `about:debugging#/runtime/this-firefox`
 3. Click **Load Temporary Add-on**
 4. Select `dist/firefox/manifest.json`
@@ -90,7 +91,8 @@ npx --yes web-ext@10.6.0 lint --source-dir dist/firefox
 
 ## Packaging
 
-- Run `node scripts/prepare-firefox.mjs`, then `npx --yes web-ext@10.6.0 build --source-dir dist/firefox` to create a Firefox archive.
+- Run `node scripts/prepare-release.mjs` to create clean staging directories for Chromium and Firefox.
+- Package `dist/chromium` as the Chrome/Edge ZIP and run `npx --yes web-ext@10.6.0 build --source-dir dist/firefox` for Firefox.
 - Keep `dist/` and generated archives out of git. The repository already ignores packaged `.zip` files.
 - For Firefox distribution, keep a stable `browser_specific_settings.gecko.id` in `manifest.firefox.json`.
 - Package only the extension files that ship to the browser: `manifest.json`, scripts, HTML, CSS, icons/assets, and license/readme files if desired.
@@ -114,6 +116,8 @@ Recommended manual checks:
 Image conversion happens locally in the browser. The extension does not require a backend service or external processing pipeline.
 
 The extension requests access to all page URLs because selected images are often hosted on a different origin from the page displaying them. It uses that access only after the user chooses one of its image context-menu commands: first to fetch the selected image and, when necessary, to run the page-context fallback. The remaining permissions provide the context menu, converted-file download, and synchronized settings.
+
+See the full [privacy policy](PRIVACY.md) for the extension's data-handling commitments.
 
 ## Limitations
 

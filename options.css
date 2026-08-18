@@ -138,6 +138,22 @@ button.secondary:hover {
   color: #b42318;
 }
 
+.project-link {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.project-link a {
+  color: var(--accent-dark);
+  font-weight: 600;
+  text-underline-offset: 3px;
+}
+
+.project-link a:hover {
+  text-decoration-thickness: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   button {
     transition: none;
