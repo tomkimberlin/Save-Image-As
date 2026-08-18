@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Save Image As",
-  "description": "Right-click any image and save it as PNG, JPG, or WebP.",
+  "description": "Right-click images to convert and save them as PNG, JPG, or WebP—locally, privately, and open source.",
   "version": "1.1.0",
+  "homepage_url": "https://github.com/tomkimberlin/Save-Image-As",
   "minimum_chrome_version": "121",
   "permissions": [
     "contextMenus",

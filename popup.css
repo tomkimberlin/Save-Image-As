@@ -52,3 +52,22 @@ button:focus-visible {
   outline: 3px solid #ffffff;
   outline-offset: 3px;
 }
+
+.source-link {
+  display: inline-block;
+  margin-left: 12px;
+  color: #ffffff;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-underline-offset: 3px;
+}
+
+.source-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.source-link:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 3px;
+  border-radius: 3px;
+}

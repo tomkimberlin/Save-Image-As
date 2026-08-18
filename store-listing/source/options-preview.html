@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Save Image As Settings Preview</title>
+    <link rel="stylesheet" href="../../options.css?v=2">
+  </head>
+  <body>
+    <main class="page">
+      <section class="panel">
+        <h1>Save Image As</h1>
+        <p class="lede">
+          Choose how converted downloads behave. PNG is always lossless, while JPG and WebP use the quality levels below.
+        </p>
+
+        <form class="settings-form">
+          <div class="field">
+            <label for="jpeg-quality-preview">JPG quality</label>
+            <input id="jpeg-quality-preview" type="range" min="0.1" max="1" step="0.01" value="0.92">
+            <output>92%</output>
+          </div>
+
+          <div class="field">
+            <label for="webp-quality-preview">WebP quality</label>
+            <input id="webp-quality-preview" type="range" min="0.1" max="1" step="0.01" value="0.9">
+            <output>90%</output>
+          </div>
+
+          <label class="checkbox-field">
+            <input type="checkbox" checked>
+            <span>Show the browser's Save As dialog before downloading</span>
+          </label>
+
+          <div class="actions">
+            <button type="button">Save settings</button>
+            <button type="button" class="secondary">Reset defaults</button>
+          </div>
+        </form>
+
+        <p class="status">Settings saved.</p>
+        <p class="project-link"><a href="https://github.com/tomkimberlin/Save-Image-As">Open source on GitHub</a></p>
+      </section>
+    </main>
+  </body>
+</html>
