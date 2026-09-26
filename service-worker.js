@@ -120,34 +120,31 @@ async function handleImageSave({ formatId, frameId, pageUrl, srcUrl, tab }) {
   const filenameBase = buildFilenameBase(srcUrl, pageUrl);
   const filename = `${filenameBase}.${format.extension}`;
 
-  if (isPageScopedUrl(srcUrl)) {
-    await saveFromPageContext({
-      filename,
-      format,
-      frameId,
-      quality,
-      saveAsDialog: settings.saveAsDialog,
-      srcUrl,
-      tabId: tab?.id
-    });
-    return;
+  const pageConversion = { format, frameId, quality, srcUrl, tabId: tab?.id };
+  let downloadUrl;
+
+  if (srcUrl.startsWith('blob:')) {
+    downloadUrl = await convertFromPageContext(pageConversion);
+  } else {
+    let sourceBlob;
+    try {
+      // Data URLs are self-contained and can be decoded without accessing the page.
+      sourceBlob = await fetchImageBlob(srcUrl);
+      const convertedBlob = await convertBlob(sourceBlob, format, quality);
+      downloadUrl = await createDownloadUrl(convertedBlob);
+    } catch (error) {
+      console.warn('Background conversion failed, attempting page fallback.', error);
+      downloadUrl = await convertFromPageContext({
+        ...pageConversion,
+        // Chromium cannot decode SVG blobs with createImageBitmap. Reuse the
+        // fetched bytes so the page canvas can draw cross-origin SVGs safely.
+        sourceDataUrl: sourceBlob ? await blobToDataUrl(sourceBlob) : undefined
+      });
+    }
   }
 
-  try {
-    const convertedBlob = await convertRemoteImage(srcUrl, format, quality);
-    await downloadBlob(convertedBlob, filename, settings.saveAsDialog);
-  } catch (error) {
-    console.warn('Worker-side conversion failed, attempting page fallback.', error);
-    await saveFromPageContext({
-      filename,
-      format,
-      frameId,
-      quality,
-      saveAsDialog: settings.saveAsDialog,
-      srcUrl,
-      tabId: tab?.id
-    });
-  }
+  // A canceled or failed download must never trigger another conversion/dialog.
+  await startDownload(downloadUrl, filename, settings.saveAsDialog);
 }
 
 async function getSettings() {
@@ -171,9 +168,10 @@ function getQualityForFormat(formatId, settings) {
   return undefined;
 }
 
-async function convertRemoteImage(srcUrl, format, quality) {
+async function fetchImageBlob(srcUrl) {
   const response = await fetch(srcUrl, {
-    credentials: 'include'
+    credentials: 'include',
+    signal: AbortSignal.timeout(20_000)
   });
 
   if (!response.ok) {
@@ -185,6 +183,10 @@ async function convertRemoteImage(srcUrl, format, quality) {
     throw new Error('The source image is empty.');
   }
 
+  return sourceBlob;
+}
+
+async function convertBlob(sourceBlob, format, quality) {
   if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
     return await convertBlobWithDocumentCanvas(sourceBlob, format, quality);
   }
@@ -208,10 +210,11 @@ async function convertRemoteImage(srcUrl, format, quality) {
 
     context.drawImage(imageBitmap, 0, 0);
 
-    return await canvas.convertToBlob({
+    const convertedBlob = await canvas.convertToBlob({
       type: format.mimeType,
       quality
     });
+    return validateConvertedBlob(convertedBlob, format);
   } finally {
     imageBitmap.close();
   }
@@ -248,19 +251,23 @@ async function convertBlobWithDocumentCanvas(sourceBlob, format, quality) {
 
     context.drawImage(image, 0, 0, width, height);
 
-    return await new Promise((resolve, reject) => {
+    const convertedBlob = await new Promise((resolve) => {
       canvas.toBlob((blob) => {
-        if (!blob) {
-          reject(new Error(`The browser could not encode ${format.label}.`));
-          return;
-        }
-
         resolve(blob);
       }, format.mimeType, quality);
     });
+    return validateConvertedBlob(convertedBlob, format);
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
+}
+
+function validateConvertedBlob(blob, format) {
+  // Canvas encoders may silently return PNG when the requested type is unsupported.
+  if (!blob?.size || blob.type !== format.mimeType) {
+    throw new Error(`The browser could not encode ${format.label}.`);
+  }
+  return blob;
 }
 
 async function loadImageElement(src) {
@@ -272,7 +279,7 @@ async function loadImageElement(src) {
   });
 }
 
-async function saveFromPageContext({ filename, format, frameId, quality, saveAsDialog, srcUrl, tabId }) {
+async function convertFromPageContext({ format, frameId, quality, srcUrl, sourceDataUrl, tabId }) {
   if (typeof tabId !== 'number') {
     throw new Error('A browser tab is required for page-context fallback.');
   }
@@ -284,11 +291,11 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
 
   const injectionResults = await extensionApi.scripting.executeScript({
     target,
-    func: async ({ fallbackQuality, fallbackSrcUrl, formatSpec }) => {
+    func: async ({ fallbackQuality, fallbackSrcUrl, sourceDataUrl, formatSpec }) => {
       try {
         const findMatchingImage = (root) => {
           for (const image of root.querySelectorAll('img')) {
-            if (image.currentSrc === fallbackSrcUrl || image.src === fallbackSrcUrl) {
+            if ((image.currentSrc || image.src) === fallbackSrcUrl) {
               return image;
             }
           }
@@ -305,16 +312,27 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
           return null;
         };
 
-        const match = findMatchingImage(document);
-
-        if (!match) {
-          return {
-            ok: false,
-            error: 'No matching image element was found in the page.'
-          };
+        let match;
+        if (sourceDataUrl) {
+          const image = new Image();
+          image.src = sourceDataUrl;
+          try {
+            await image.decode();
+            match = image;
+          } catch {
+            // A fresh request may return a login page while the original image
+            // remains drawable in the tab. Keep the visible-image fallback.
+          }
         }
-
-        if (typeof match.decode === 'function') {
+        match ||= findMatchingImage(document);
+        if (!match) {
+          match = new Image();
+          if (/^https?:/.test(fallbackSrcUrl)) {
+            match.crossOrigin = 'use-credentials';
+          }
+          match.src = fallbackSrcUrl;
+          await match.decode();
+        } else if (typeof match.decode === 'function') {
           try {
             await match.decode();
           } catch {
@@ -361,7 +379,7 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
           }
         });
 
-        if (!convertedBlob) {
+        if (!convertedBlob?.size || convertedBlob.type !== formatSpec.mimeType) {
           return {
             ok: false,
             error: `The browser could not encode ${formatSpec.label}.`
@@ -397,6 +415,7 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
       {
         fallbackQuality: quality,
         fallbackSrcUrl: srcUrl,
+        sourceDataUrl: sourceDataUrl || null,
         formatSpec: format
       }
     ]
@@ -409,12 +428,19 @@ async function saveFromPageContext({ filename, format, frameId, quality, saveAsD
 
   if (
     typeof result.dataUrl !== 'string' ||
-    !result.dataUrl.startsWith(`data:${format.mimeType}`)
+    !result.dataUrl.startsWith(`data:${format.mimeType};base64,`)
   ) {
     throw new Error('Page fallback failed to produce image data.');
   }
 
-  await startDownload(result.dataUrl, filename, saveAsDialog);
+  // Firefox rejects data URLs in downloads.download. Recreate the converted
+  // blob in the extension so its object URL has the correct owner and lifetime.
+  if (typeof URL.createObjectURL === 'function' && typeof URL.revokeObjectURL === 'function') {
+    const blob = await (await fetch(result.dataUrl)).blob();
+    return createDownloadUrl(validateConvertedBlob(blob, format));
+  }
+
+  return result.dataUrl;
 }
 
 async function showFailureBadge(tabId, message) {
@@ -453,15 +479,6 @@ async function showFailureBadge(tabId, message) {
   }, 5000);
 }
 
-async function downloadBlob(blob, filename, saveAsDialog) {
-  if (!(blob instanceof Blob) || !blob.size) {
-    throw new Error('The converted image could not be prepared for download.');
-  }
-
-  const downloadUrl = await createDownloadUrl(blob);
-  await startDownload(downloadUrl, filename, saveAsDialog);
-}
-
 async function startDownload(downloadUrl, filename, saveAsDialog) {
   if (typeof downloadUrl !== 'string' || !/^(?:blob|data):/.test(downloadUrl)) {
     throw new Error('The converted image did not produce a valid download URL.');
@@ -478,11 +495,23 @@ async function startDownload(downloadUrl, filename, saveAsDialog) {
     });
   } catch (error) {
     revokeDownloadUrl(downloadUrl);
+    if (/^(?:Download cancel(?:l)?ed(?: by the user)?\.?|USER_CANCELED)$/i.test(error?.message || '')) {
+      return;
+    }
     throw error;
   }
 
   if (typeof downloadId === 'number' && downloadUrl.startsWith('blob:')) {
     pendingObjectUrls.set(downloadId, downloadUrl);
+    // A small download can finish before downloads.download() resolves.
+    try {
+      const [download] = await extensionApi.downloads.search({ id: downloadId });
+      if (!download || download.state === 'complete' || download.state === 'interrupted') {
+        revokePendingObjectUrl(downloadId);
+      }
+    } catch (error) {
+      console.warn('Unable to check download completion.', error);
+    }
     return;
   }
 
@@ -572,7 +601,14 @@ function extractFilename(value) {
   try {
     const url = new URL(value);
     const pathname = url.pathname.split('/').filter(Boolean).pop();
-    return pathname ? decodeURIComponent(pathname) : url.hostname;
+    if (!pathname) {
+      return url.hostname;
+    }
+    try {
+      return decodeURIComponent(pathname);
+    } catch {
+      return pathname;
+    }
   } catch {
     return '';
   }
@@ -583,12 +619,25 @@ function removeExtension(filename) {
 }
 
 function sanitizeFilename(filename) {
-  const sanitized = filename
-    .replace(/[<>:"/\\|?*\p{Cc}]/gu, '-')
+  const cleaned = filename
+    .replace(/[<>:"/\\|?*\p{Cc}\u202a-\u202e\u2066-\u2069]/gu, '-')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 180)
-    .replace(/[. ]+$/g, '');
+    .replace(/^[. ]+|[. ]+$/g, '');
+
+  // Leave room for the extension and duplicate suffix on filesystems with a
+  // 255-byte filename limit, without splitting emoji or other Unicode characters.
+  const encoder = new TextEncoder();
+  let sanitized = '';
+  let bytes = 0;
+  for (const character of cleaned) {
+    bytes += encoder.encode(character).length;
+    if (bytes > 180) {
+      break;
+    }
+    sanitized += character;
+  }
+  sanitized = sanitized.replace(/[. ]+$/g, '');
 
   if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(sanitized)) {
     return `_${sanitized}`;
@@ -608,10 +657,6 @@ function normalizeQuality(value, fallback) {
 
 function normalizeBoolean(value, fallback) {
   return typeof value === 'boolean' ? value : fallback;
-}
-
-function isPageScopedUrl(url) {
-  return typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('data:'));
 }
 
 function isSupportedPageUrl(url) {

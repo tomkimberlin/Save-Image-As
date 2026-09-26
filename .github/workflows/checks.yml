@@ -1,0 +1,26 @@
+name: Extension checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Regression tests
+        run: node --test tests/*.test.mjs
+      - name: Check JavaScript
+        run: |
+          node --check service-worker.js
+          node --check options.js
+          node --check popup.js
+      - name: Prepare browser packages
+        run: node scripts/prepare-release.mjs
+      - name: Validate Firefox extension
+        run: npx --yes web-ext@10.6.0 lint --source-dir dist/firefox --warnings-as-errors
