@@ -14,6 +14,8 @@ Browsers already let people save images, but they usually do not offer format co
 - Fills transparent areas with white when exporting to JPG
 - Includes adjustable JPG and WebP quality settings
 - Uses a fallback path for some page-scoped images such as `blob:` URLs
+- Converts SVG sources, including images hosted on a different site
+- Handles embedded raster `data:` images without needing access to the page
 - Runs entirely in the browser with no backend service
 
 ## Supported Formats
@@ -26,7 +28,9 @@ Formats such as GIF, TIFF, BMP, and AVIF are intentionally not included by defau
 
 ## How It Works
 
-The extension uses browser-specific Manifest V3 files so each browser receives only the background configuration it supports. Chromium browsers load `service-worker.js` as a service worker, while the prepared Firefox package loads the same file through `background.scripts`. For standard image URLs, the extension fetches the source image and converts it inside the extension context before downloading the result. Chromium uses the worker-friendly `createImageBitmap` and `OffscreenCanvas` path, while Firefox uses a document-backed `<canvas>` path in its background page. For page-scoped sources such as some `blob:` and `data:` URLs, it falls back to page-context conversion when possible.
+The extension uses browser-specific Manifest V3 files so each browser receives only the background configuration it supports. Chromium browsers load `service-worker.js` as a service worker, while the prepared Firefox package loads the same file through `background.scripts`. For standard image URLs and embedded `data:` images, the extension fetches the source image and converts it inside the extension context before downloading the result. Chromium uses `createImageBitmap` and `OffscreenCanvas`, while Firefox uses a document-backed `<canvas>` in its background page.
+
+For page-scoped `blob:` images, it converts in the selected image's frame. If background decoding fails, as it does for SVG in Chromium, the extension passes the already-fetched image bytes to the page converter. This avoids another network request and allows cross-origin SVG conversion. Slow image requests time out after 20 seconds before trying the page fallback.
 
 ## Settings
 
@@ -66,6 +70,7 @@ The project is built as a plain Manifest V3 extension with no bundler or framewo
 For a quick source validation pass:
 
 ```sh
+node --test tests/*.test.mjs
 node --check service-worker.js
 node --check options.js
 node --check popup.js
@@ -100,6 +105,8 @@ npx --yes web-ext@10.6.0 lint --source-dir dist/firefox
 
 ## Testing
 
+The automated regression suite uses Node.js 22 or later and requires no dependencies. It covers download cancellation, fallback routing, output format checks, resource cleanup, and filenames. GitHub Actions runs it alongside source checks and Firefox package validation on pushes and pull requests.
+
 Recommended manual checks:
 
 - Confirm the extension version shown in the browser matches the current `manifest.json`
@@ -109,7 +116,18 @@ Recommended manual checks:
 - Lower JPG and WebP quality settings and confirm output size changes
 - Try images from multiple sites to exercise cross-origin behavior
 - Try a page that uses `blob:` image URLs to verify fallback behavior
-- Try an SVG source in Firefox and confirm the exported PNG/JPG/WebP file is actually written to disk
+- Try an SVG hosted on another domain in Chrome and Firefox and confirm each output format is written to disk
+- Cancel the Save As dialog and confirm it stays closed without an error badge
+- Try embedded data images, images inside iframes, and long Unicode filenames
+
+## Changes in 1.1.1
+
+- Canceling a download stops immediately without opening another Save As dialog.
+- Chromium can convert cross-origin SVGs using the fetched source bytes.
+- Embedded data images and blob images without a matching page element can be saved.
+- Firefox page conversions download through extension-owned object URLs, fixing rejected data-URL downloads.
+- Filenames fit common filesystem limits, including long Unicode names, and do not become hidden files.
+- Output formats are checked before download, and completed downloads release their temporary object URLs even when completion arrives early.
 
 ## Privacy
 
