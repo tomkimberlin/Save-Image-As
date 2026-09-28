@@ -169,10 +169,19 @@ function getQualityForFormat(formatId, settings) {
 }
 
 async function fetchImageBlob(srcUrl) {
-  const response = await fetch(srcUrl, {
-    credentials: 'include',
-    signal: AbortSignal.timeout(20_000)
-  });
+  const signal = AbortSignal.timeout(20_000);
+  let response;
+  try {
+    response = await fetch(srcUrl, { credentials: 'include', signal });
+  } catch (error) {
+    // Restricted hosts such as addons.mozilla.org still enforce CORS in the
+    // background. Their public images can allow anonymous requests (*) while
+    // rejecting credentials. Retry without cookies before needing page access.
+    if (signal.aborted || !/^https?:/i.test(srcUrl)) {
+      throw error;
+    }
+    response = await fetch(srcUrl, { credentials: 'omit', signal });
+  }
 
   if (!response.ok) {
     throw new Error(`Image request failed with status ${response.status}.`);
