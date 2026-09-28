@@ -281,3 +281,54 @@ test('filenames retain usable URL paths even with malformed percent encoding', (
   assert.equal(context.buildFilenameBase('https://example.com/caf%C3%A9.webp', ''), 'café');
   assert.equal(context.buildFilenameBase('blob:https://example.com/id', 'https://example.com/gallery.html'), 'gallery');
 });
+
+for (const formatId of ['png', 'jpg', 'webp']) {
+  test(`public AMO images retry anonymously and save ${formatId} without page access`, async () => {
+    const { context, api, downloads, injections } = loadWorker();
+    const calls = [];
+    const srcUrl = 'https://addons.mozilla.org/static-server/img/addon-icons/default-64.png';
+    context.fetch = async (url, options) => {
+      assert.equal(url, srcUrl);
+      calls.push(options);
+      if (options.credentials === 'include') throw new TypeError('NetworkError');
+      return { ok: true, blob: async () => new Blob(['image'], { type: 'image/png' }) };
+    };
+    api.scripting.executeScript = async () => { throw new Error('Missing host permission for the tab'); };
+    await context.handleImageSave({ ...request, formatId, srcUrl, pageUrl: 'https://addons.mozilla.org/' });
+    assert.deepEqual(calls.map((call) => call.credentials), ['include', 'omit']);
+    assert.equal(calls[0].signal, calls[1].signal, 'Retries share the original time budget');
+    assert.equal(downloads.length, 1);
+    assert.equal(downloads[0].filename, `default-64.${formatId}`);
+    assert.equal(injections.length, 0);
+  });
+}
+
+test('HTTP errors do not retry without credentials', async () => {
+  const { context } = loadWorker();
+  let attempts = 0;
+  context.fetch = async () => { attempts++; return { ok: false, status: 403 }; };
+  await assert.rejects(context.fetchImageBlob(request.srcUrl), /403/);
+  assert.equal(attempts, 1);
+});
+
+test('an expired network timeout does not start an anonymous retry', async () => {
+  const { context } = loadWorker();
+  const controller = new AbortController();
+  context.AbortSignal = { timeout: () => controller.signal };
+  let attempts = 0;
+  context.fetch = async () => {
+    attempts++;
+    controller.abort();
+    throw new Error('timeout');
+  };
+  await assert.rejects(context.fetchImageBlob(request.srcUrl), /timeout/);
+  assert.equal(attempts, 1);
+});
+
+test('non-HTTP fetch failures do not retry anonymously', async () => {
+  const { context } = loadWorker();
+  let attempts = 0;
+  context.fetch = async () => { attempts++; throw new Error('invalid data'); };
+  await assert.rejects(context.fetchImageBlob('data:image/png;base64,bad'), /invalid data/);
+  assert.equal(attempts, 1);
+});

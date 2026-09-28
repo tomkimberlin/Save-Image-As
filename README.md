@@ -115,10 +115,15 @@ Recommended manual checks:
 - Convert a transparent PNG to JPG and confirm transparent regions become white
 - Lower JPG and WebP quality settings and confirm output size changes
 - Try images from multiple sites to exercise cross-origin behavior
+- On Firefox Add-ons, export the green default puzzle-piece icon as PNG, JPG, and WebP without changing Firefox security settings
 - Try a page that uses `blob:` image URLs to verify fallback behavior
 - Try an SVG hosted on another domain in Chrome and Firefox and confirm each output format is written to disk
 - Cancel the Save As dialog and confirm it stays closed without an error badge
 - Try embedded data images, images inside iframes, and long Unicode filenames
+
+## Changes in 1.1.2
+
+- Public images such as the Firefox Add-ons puzzle-piece icon can be saved when their server rejects requests with cookies. The extension retries without cookies before attempting page conversion, within the original 20-second timeout.
 
 ## Changes in 1.1.1
 
