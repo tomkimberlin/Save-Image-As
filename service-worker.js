@@ -3,6 +3,10 @@ const extensionApi = globalThis.browser ?? globalThis.chrome;
 const ROOT_MENU_ID = 'save-image-as-root';
 const MENU_PREFIX = 'save-image-as:';
 const SUPPORTED_PAGE_PATTERNS = ['http://*/*', 'https://*/*', 'file:///*'];
+const IMAGE_TIMEOUT_MS = 20_000;
+const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+const IMAGE_LIMITS = { maxPixels: 64_000_000, maxDimension: 32_767 };
 
 const FORMATS = {
   png: {
@@ -31,7 +35,8 @@ const DEFAULT_SETTINGS = {
   saveAsDialog: true
 };
 
-const pendingObjectUrls = new Map();
+const pendingDownloads = new Map();
+const failureBadges = new Map();
 
 extensionApi.runtime.onInstalled.addListener(() => {
   rebuildContextMenus();
@@ -70,9 +75,11 @@ extensionApi.downloads.onChanged.addListener((delta) => {
   }
 
   if (delta.state?.current === 'complete' || delta.state?.current === 'interrupted') {
-    revokePendingObjectUrl(delta.id);
+    finishDownload(delta.id, delta.state.current === 'interrupted' ? delta.error?.current || 'Download interrupted' : undefined);
   }
 });
+
+extensionApi.downloads.onErased.addListener((downloadId) => finishDownload(downloadId));
 
 async function createContextMenus() {
   await extensionApi.contextMenus.removeAll();
@@ -106,13 +113,17 @@ function getFormatIdFromMenu(menuItemId) {
     return null;
   }
 
-  return menuItemId.slice(MENU_PREFIX.length);
+  const formatId = menuItemId.slice(MENU_PREFIX.length);
+  return Object.hasOwn(FORMATS, formatId) ? formatId : null;
 }
 
 async function handleImageSave({ formatId, frameId, pageUrl, srcUrl, tab }) {
-  const format = FORMATS[formatId];
-  if (!format) {
+  if (!Object.hasOwn(FORMATS, formatId)) {
     throw new Error(`Unsupported target format: ${formatId}`);
+  }
+  const format = FORMATS[formatId];
+  if (typeof srcUrl !== 'string' || !/^(?:https?|file|data|blob):/i.test(srcUrl)) {
+    throw new Error('The selected image URL is not supported.');
   }
 
   const settings = await getSettings();
@@ -133,6 +144,10 @@ async function handleImageSave({ formatId, frameId, pageUrl, srcUrl, tab }) {
       const convertedBlob = await convertBlob(sourceBlob, format, quality);
       downloadUrl = await createDownloadUrl(convertedBlob);
     } catch (error) {
+      // Retrying oversized images in the page would repeat the same allocation.
+      if (error.name === 'ImageLimitError') {
+        throw error;
+      }
       console.warn('Background conversion failed, attempting page fallback.', error);
       downloadUrl = await convertFromPageContext({
         ...pageConversion,
@@ -144,7 +159,7 @@ async function handleImageSave({ formatId, frameId, pageUrl, srcUrl, tab }) {
   }
 
   // A canceled or failed download must never trigger another conversion/dialog.
-  await startDownload(downloadUrl, filename, settings.saveAsDialog);
+  await startDownload(downloadUrl, filename, settings.saveAsDialog, tab?.id);
 }
 
 async function getSettings() {
@@ -169,7 +184,7 @@ function getQualityForFormat(formatId, settings) {
 }
 
 async function fetchImageBlob(srcUrl) {
-  const signal = AbortSignal.timeout(20_000);
+  const signal = AbortSignal.timeout(IMAGE_TIMEOUT_MS);
   let response;
   try {
     response = await fetch(srcUrl, { credentials: 'include', signal });
@@ -184,15 +199,68 @@ async function fetchImageBlob(srcUrl) {
   }
 
   if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
     throw new Error(`Image request failed with status ${response.status}.`);
   }
 
-  const sourceBlob = await response.blob();
+  const sourceBlob = await readImageResponse(response);
   if (!sourceBlob.size) {
     throw new Error('The source image is empty.');
   }
 
   return sourceBlob;
+}
+
+function imageLimitError(message) {
+  const error = new Error(message);
+  error.name = 'ImageLimitError';
+  return error;
+}
+
+async function readImageResponse(response) {
+  if (Number(response.headers?.get('content-length')) > MAX_SOURCE_BYTES) {
+    await response.body?.cancel().catch(() => {});
+    throw imageLimitError('The source image exceeds the 32 MiB size limit.');
+  }
+
+  if (!response.body) {
+    const blob = await response.blob();
+    if (blob.size > MAX_SOURCE_BYTES) {
+      throw imageLimitError('The source image exceeds the 32 MiB size limit.');
+    }
+    return blob;
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_SOURCE_BYTES) {
+        throw imageLimitError('The source image exceeds the 32 MiB size limit.');
+      }
+      chunks.push(value);
+    }
+    return new Blob(chunks, { type: response.headers?.get('content-type') || '' });
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function validateImageSize(width, height) {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+    throw new Error('The source image has no drawable size.');
+  }
+  if (width > IMAGE_LIMITS.maxDimension || height > IMAGE_LIMITS.maxDimension ||
+      width * height > IMAGE_LIMITS.maxPixels) {
+    throw imageLimitError('The image exceeds the 64 megapixel or 32,767 pixel dimension limit.');
+  }
 }
 
 async function convertBlob(sourceBlob, format, quality) {
@@ -201,9 +269,11 @@ async function convertBlob(sourceBlob, format, quality) {
   }
 
   const imageBitmap = await createImageBitmap(sourceBlob);
+  let canvas;
 
   try {
-    const canvas = new OffscreenCanvas(imageBitmap.width, imageBitmap.height);
+    validateImageSize(imageBitmap.width, imageBitmap.height);
+    canvas = new OffscreenCanvas(imageBitmap.width, imageBitmap.height);
     const context = canvas.getContext('2d', {
       alpha: format.mimeType !== 'image/jpeg'
     });
@@ -225,23 +295,23 @@ async function convertBlob(sourceBlob, format, quality) {
     });
     return validateConvertedBlob(convertedBlob, format);
   } finally {
+    if (canvas) canvas.width = canvas.height = 0;
     imageBitmap.close();
   }
 }
 
 async function convertBlobWithDocumentCanvas(sourceBlob, format, quality) {
   const objectUrl = URL.createObjectURL(sourceBlob);
+  let image;
+  let canvas;
 
   try {
-    const image = await loadImageElement(objectUrl);
-    const width = image.naturalWidth || image.width;
-    const height = image.naturalHeight || image.height;
+    image = await loadImageElement(objectUrl);
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    validateImageSize(width, height);
 
-    if (!width || !height) {
-      throw new Error('The source image has no drawable size.');
-    }
-
-    const canvas = document.createElement('canvas');
+    canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
 
@@ -267,6 +337,8 @@ async function convertBlobWithDocumentCanvas(sourceBlob, format, quality) {
     });
     return validateConvertedBlob(convertedBlob, format);
   } finally {
+    if (canvas) canvas.width = canvas.height = 0;
+    if (image) image.src = '';
     URL.revokeObjectURL(objectUrl);
   }
 }
@@ -276,14 +348,28 @@ function validateConvertedBlob(blob, format) {
   if (!blob?.size || blob.type !== format.mimeType) {
     throw new Error(`The browser could not encode ${format.label}.`);
   }
+  if (blob.size > MAX_OUTPUT_BYTES) {
+    throw imageLimitError('The converted image exceeds the 64 MiB size limit.');
+  }
   return blob;
 }
 
 async function loadImageElement(src) {
   return await new Promise((resolve, reject) => {
     const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('The source image could not be decoded.'));
+    const finish = (error) => {
+      clearTimeout(timer);
+      image.onload = image.onerror = null;
+      if (error) {
+        image.src = '';
+        reject(error);
+      } else {
+        resolve(image);
+      }
+    };
+    const timer = setTimeout(() => finish(new Error('Timed out loading the source image.')), IMAGE_TIMEOUT_MS);
+    image.onload = () => finish();
+    image.onerror = () => finish(new Error('The source image could not be decoded.'));
     image.src = src;
   });
 }
@@ -300,7 +386,32 @@ async function convertFromPageContext({ format, frameId, quality, srcUrl, source
 
   const injectionResults = await extensionApi.scripting.executeScript({
     target,
-    func: async ({ fallbackQuality, fallbackSrcUrl, sourceDataUrl, formatSpec }) => {
+    func: async ({ fallbackQuality, fallbackSrcUrl, sourceDataUrl, formatSpec, timeoutMs, limits, maxOutputBytes }) => {
+      const ownedImages = [];
+      let canvas;
+      const deadline = Date.now() + timeoutMs;
+      const decodeImage = async (image) => {
+        let timer;
+        try {
+          await Promise.race([
+            image.decode(),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => {
+                const error = new Error('Timed out loading the selected image.');
+                error.name = 'TimeoutError';
+                reject(error);
+              }, Math.max(0, deadline - Date.now()));
+            })
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      const createImage = () => {
+        const image = new Image();
+        ownedImages.push(image);
+        return image;
+      };
       try {
         const findMatchingImage = (root) => {
           for (const image of root.querySelectorAll('img')) {
@@ -323,42 +434,47 @@ async function convertFromPageContext({ format, frameId, quality, srcUrl, source
 
         let match;
         if (sourceDataUrl) {
-          const image = new Image();
+          const image = createImage();
           image.src = sourceDataUrl;
           try {
-            await image.decode();
+            await decodeImage(image);
             match = image;
-          } catch {
+          } catch (error) {
+            if (error.name === 'TimeoutError') throw error;
             // A fresh request may return a login page while the original image
             // remains drawable in the tab. Keep the visible-image fallback.
           }
         }
         match ||= findMatchingImage(document);
         if (!match) {
-          match = new Image();
+          match = createImage();
           if (/^https?:/.test(fallbackSrcUrl)) {
             match.crossOrigin = 'use-credentials';
           }
           match.src = fallbackSrcUrl;
-          await match.decode();
-        } else if (typeof match.decode === 'function') {
+          await decodeImage(match);
+        } else if (!match.complete && typeof match.decode === 'function') {
           try {
-            await match.decode();
-          } catch {
+            await decodeImage(match);
+          } catch (error) {
+            if (error.name === 'TimeoutError') throw error;
             // Ignore decode failures and draw the already-visible image.
           }
         }
 
-        const width = match.naturalWidth || match.width;
-        const height = match.naturalHeight || match.height;
+        const width = match.naturalWidth;
+        const height = match.naturalHeight;
         if (!width || !height) {
           return {
             ok: false,
             error: 'The selected image has no drawable size.'
           };
         }
+        if (width > limits.maxDimension || height > limits.maxDimension || width * height > limits.maxPixels) {
+          throw new Error('The image exceeds the 64 megapixel or 32,767 pixel dimension limit.');
+        }
 
-        const canvas = document.createElement('canvas');
+        canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
 
@@ -394,6 +510,9 @@ async function convertFromPageContext({ format, frameId, quality, srcUrl, source
             error: `The browser could not encode ${formatSpec.label}.`
           };
         }
+        if (convertedBlob.size > maxOutputBytes) {
+          throw new Error('The converted image exceeds the 64 MiB size limit.');
+        }
 
         const dataUrl = await new Promise((resolve, reject) => {
           const reader = new FileReader();
@@ -418,6 +537,10 @@ async function convertFromPageContext({ format, frameId, quality, srcUrl, source
           ok: false,
           error: error instanceof Error ? error.message : String(error)
         };
+      } finally {
+        if (canvas) canvas.width = canvas.height = 0;
+        // Never change or cancel the page's own image elements.
+        for (const image of ownedImages) image.src = '';
       }
     },
     args: [
@@ -425,7 +548,10 @@ async function convertFromPageContext({ format, frameId, quality, srcUrl, source
         fallbackQuality: quality,
         fallbackSrcUrl: srcUrl,
         sourceDataUrl: sourceDataUrl || null,
-        formatSpec: format
+        formatSpec: format,
+        timeoutMs: IMAGE_TIMEOUT_MS,
+        limits: IMAGE_LIMITS,
+        maxOutputBytes: MAX_OUTPUT_BYTES
       }
     ]
   });
@@ -456,23 +582,32 @@ async function showFailureBadge(tabId, message) {
   if (typeof tabId !== 'number') {
     return;
   }
+  const generation = Symbol();
+  failureBadges.set(tabId, generation);
 
-  await Promise.all([
-    extensionApi.action.setBadgeBackgroundColor({
-      tabId,
-      color: '#b42318'
-    }),
-    extensionApi.action.setBadgeText({
-      tabId,
-      text: '!'
-    }),
-    extensionApi.action.setTitle({
-      tabId,
-      title: `Save Image As: ${message}`
-    })
-  ]);
+  try {
+    await Promise.all([
+      extensionApi.action.setBadgeBackgroundColor({
+        tabId,
+        color: '#b42318'
+      }),
+      extensionApi.action.setBadgeText({
+        tabId,
+        text: '!'
+      }),
+      extensionApi.action.setTitle({
+        tabId,
+        title: `Save Image As: ${message}`
+      })
+    ]);
+  } catch (error) {
+    if (failureBadges.get(tabId) === generation) failureBadges.delete(tabId);
+    throw error;
+  }
 
   setTimeout(() => {
+    if (failureBadges.get(tabId) !== generation) return;
+    failureBadges.delete(tabId);
     void Promise.all([
       extensionApi.action.setBadgeText({
         tabId,
@@ -488,7 +623,7 @@ async function showFailureBadge(tabId, message) {
   }, 5000);
 }
 
-async function startDownload(downloadUrl, filename, saveAsDialog) {
+async function startDownload(downloadUrl, filename, saveAsDialog, tabId) {
   if (typeof downloadUrl !== 'string' || !/^(?:blob|data):/.test(downloadUrl)) {
     throw new Error('The converted image did not produce a valid download URL.');
   }
@@ -510,13 +645,13 @@ async function startDownload(downloadUrl, filename, saveAsDialog) {
     throw error;
   }
 
-  if (typeof downloadId === 'number' && downloadUrl.startsWith('blob:')) {
-    pendingObjectUrls.set(downloadId, downloadUrl);
+  if (typeof downloadId === 'number') {
+    pendingDownloads.set(downloadId, { downloadUrl: downloadUrl.startsWith('blob:') ? downloadUrl : undefined, tabId });
     // A small download can finish before downloads.download() resolves.
     try {
       const [download] = await extensionApi.downloads.search({ id: downloadId });
       if (!download || download.state === 'complete' || download.state === 'interrupted') {
-        revokePendingObjectUrl(downloadId);
+        finishDownload(downloadId, download?.state === 'interrupted' ? download.error || 'Download interrupted' : undefined);
       }
     } catch (error) {
       console.warn('Unable to check download completion.', error);
@@ -524,21 +659,23 @@ async function startDownload(downloadUrl, filename, saveAsDialog) {
     return;
   }
 
-  if (downloadUrl.startsWith('blob:')) {
-    setTimeout(() => {
-      revokeDownloadUrl(downloadUrl);
-    }, 60_000);
-  }
+  revokeDownloadUrl(downloadUrl);
+  throw new Error('The browser did not return a download ID.');
 }
 
-function revokePendingObjectUrl(downloadId) {
-  const downloadUrl = pendingObjectUrls.get(downloadId);
-  if (!downloadUrl) {
+function finishDownload(downloadId, error) {
+  const pending = pendingDownloads.get(downloadId);
+  if (!pending) {
     return;
   }
 
-  pendingObjectUrls.delete(downloadId);
-  revokeDownloadUrl(downloadUrl);
+  pendingDownloads.delete(downloadId);
+  revokeDownloadUrl(pending.downloadUrl);
+  if (error && error !== 'USER_CANCELED') {
+    void showFailureBadge(pending.tabId, `Download failed: ${error}`).catch(() => {
+      // The originating tab may have closed while the download was running.
+    });
+  }
 }
 
 async function createDownloadUrl(blob) {
@@ -648,7 +785,7 @@ function sanitizeFilename(filename) {
   }
   sanitized = sanitized.replace(/[. ]+$/g, '');
 
-  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(sanitized)) {
+  if (/^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(sanitized)) {
     return `_${sanitized}`;
   }
 
@@ -656,6 +793,9 @@ function sanitizeFilename(filename) {
 }
 
 function normalizeQuality(value, fallback) {
+  if (!['number', 'string'].includes(typeof value) || (typeof value === 'string' && !value.trim())) {
+    return fallback;
+  }
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue)) {
     return fallback;

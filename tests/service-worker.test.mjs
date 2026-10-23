@@ -18,8 +18,10 @@ function loadWorker() {
   const api = {
     runtime: { onInstalled: event('installed'), onStartup: event('startup') },
     contextMenus: { onClicked: event('clicked') },
+    action: { setBadgeBackgroundColor: async () => {}, setBadgeText: async () => {}, setTitle: async () => {} },
     downloads: {
       onChanged: event('downloadChanged'),
+      onErased: event('downloadErased'),
       download: async (options) => { downloads.push(options); return 1; },
       search: async () => [{ id: 1, state: 'in_progress' }]
     },
@@ -34,7 +36,7 @@ function loadWorker() {
   const context = vm.createContext({
     browser: api, URL: TestURL, Blob, TextEncoder, AbortSignal,
     console: { warn() {}, error() {} },
-    setTimeout: () => 1,
+    setTimeout: () => 1, clearTimeout() {},
     fetch: async (url) => url.startsWith('data:')
       ? fetch(url)
       : { ok: true, blob: async () => new Blob(['source'], { type: 'image/png' }) },
@@ -156,7 +158,7 @@ function mockPage(worker, images) {
   worker.context.document = {
     querySelectorAll: (selector) => selector === 'img' ? images : [],
     createElement: () => ({
-      getContext: () => ({ drawImage: (image) => drawn.push(image) }),
+      getContext: () => ({ drawImage: (image) => drawn.push({ ...image }), fillRect() {} }),
       toBlob: (callback, type) => callback(new Blob(['pixels'], { type }))
     })
   };
@@ -188,7 +190,7 @@ test('page conversion uses the selected currentSrc when responsive images share 
   const other = { ...selected, currentSrc: 'blob:https://example.com/other' };
   const drawn = mockPage(worker, [other, selected]);
   await worker.context.convertFromPageContext(pageRequest);
-  assert.deepEqual(drawn, [selected]);
+  assert.equal(drawn[0].currentSrc, selected.currentSrc);
 });
 
 test('page conversion can load a blob even when no matching img exists', async () => {
@@ -204,7 +206,7 @@ test('a login response on refetch still allows exporting the visible image', asy
   const visible = { src: pageRequest.srcUrl, naturalWidth: 64, naturalHeight: 48 };
   const drawn = mockPage(worker, [visible]);
   await worker.context.convertFromPageContext({ ...pageRequest, sourceDataUrl: 'data:text/html,<h1>Log in</h1>' });
-  assert.deepEqual(drawn, [visible]);
+  assert.equal(drawn[0].src, visible.src);
 });
 
 test('canvas encoding rejects empty output and silent PNG fallback', async () => {
@@ -331,4 +333,200 @@ test('non-HTTP fetch failures do not retry anonymously', async () => {
   context.fetch = async () => { attempts++; throw new Error('invalid data'); };
   await assert.rejects(context.fetchImageBlob('data:image/png;base64,bad'), /invalid data/);
   assert.equal(attempts, 1);
+});
+
+test('unrecognized formats and URL schemes stop before fetching or injecting', async () => {
+  const { context, injections, downloads } = loadWorker();
+  context.fetch = () => assert.fail('Unexpected fetch');
+  for (const formatId of ['constructor', '__proto__', 'gif']) {
+    assert.equal(context.getFormatIdFromMenu(`save-image-as:${formatId}`), null);
+    await assert.rejects(context.handleImageSave({ ...request, formatId }), /Unsupported/);
+  }
+  await assert.rejects(context.handleImageSave({ ...request, srcUrl: 'javascript:alert(1)' }), /URL is not supported/);
+  assert.equal(injections.length, 0);
+  assert.equal(downloads.length, 0);
+});
+
+test('an oversized declared response is canceled without decoding or page retry', async () => {
+  const { context, injections } = loadWorker();
+  let canceled = false;
+  context.fetch = async () => ({
+    ok: true, headers: new Headers({ 'content-length': String(33 * 1024 * 1024) }),
+    body: { cancel: async () => { canceled = true; }, getReader() { assert.fail('Must not read body'); } }
+  });
+  context.createImageBitmap = () => assert.fail('Must not decode oversized input');
+  await assert.rejects(context.handleImageSave(request), /32 MiB/);
+  assert.equal(canceled, true);
+  assert.equal(injections.length, 0);
+});
+
+test('streamed images are bounded even without a Content-Length header', async () => {
+  const { context, injections } = loadWorker();
+  let canceled = false;
+  context.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(32 * 1024 * 1024));
+      controller.enqueue(new Uint8Array(1));
+    },
+    cancel() { canceled = true; }
+  }));
+  await assert.rejects(context.handleImageSave(request), /32 MiB/);
+  assert.equal(canceled, true);
+  assert.equal(injections.length, 0);
+});
+
+test('bounded streaming preserves image bytes and MIME type', async () => {
+  const { context } = loadWorker();
+  context.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Uint8Array.of(1, 2));
+      controller.enqueue(Uint8Array.of(3));
+      controller.close();
+    }
+  }), { headers: { 'content-type': 'image/png' } });
+  const blob = await context.fetchImageBlob(request.srcUrl);
+  assert.equal(blob.type, 'image/png');
+  assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [1, 2, 3]);
+});
+
+test('oversized decoded images close their bitmap without a canvas or page retry', async () => {
+  const { context, injections } = loadWorker();
+  let closed = false;
+  context.createImageBitmap = async () => ({ width: 10_000, height: 10_000, close() { closed = true; } });
+  context.OffscreenCanvas = class { constructor() { assert.fail('Must not allocate canvas'); } };
+  await assert.rejects(context.handleImageSave(request), /64 megapixel/);
+  assert.equal(closed, true);
+  assert.equal(injections.length, 0);
+  assert.throws(() => context.validateImageSize(32768, 1), /dimension limit/);
+  assert.throws(() => context.validateImageSize(0, 1), /drawable size/);
+});
+
+test('oversized encoded output is rejected', () => {
+  const { context } = loadWorker();
+  assert.throws(() => context.validateConvertedBlob({ size: 65 * 1024 * 1024, type: 'image/png' },
+    { mimeType: 'image/png' }), /64 MiB/);
+});
+
+test('canvas backing storage is released on success and encoding failure', async () => {
+  const { context } = loadWorker();
+  const canvases = [];
+  context.OffscreenCanvas = class {
+    constructor(width, height) { this.width = width; this.height = height; canvases.push(this); }
+    getContext() { return { drawImage() {} }; }
+    async convertToBlob({ type }) { return new Blob(['image'], { type }); }
+  };
+  await context.convertBlob(new Blob(['x']), { mimeType: 'image/png' });
+  context.OffscreenCanvas.prototype.convertToBlob = async () => { throw new Error('encoder failed'); };
+  await assert.rejects(context.convertBlob(new Blob(['x']), { mimeType: 'image/png' }), /encoder failed/);
+  assert.ok(canvases.every((canvas) => canvas.width === 0 && canvas.height === 0));
+});
+
+test('document image loading times out and detaches handlers and its owned request', async () => {
+  const { context } = loadWorker();
+  let image, expire;
+  context.Image = class { constructor() { image = this; } };
+  context.setTimeout = (callback) => { expire = callback; return 1; };
+  const loading = context.loadImageElement('blob:source');
+  expire();
+  await assert.rejects(loading, /Timed out/);
+  assert.equal(image.src, '');
+  assert.equal(image.onload, null);
+  assert.equal(image.onerror, null);
+});
+
+test('page fallback times out and cancels only extension-owned images', async () => {
+  const worker = loadWorker();
+  mockPage(worker, []);
+  let owned, expire;
+  worker.context.Image = class {
+    constructor() { owned = this; }
+    decode() { return new Promise(() => {}); }
+  };
+  worker.context.setTimeout = (callback) => { expire = callback; return 1; };
+  const saving = worker.context.convertFromPageContext(pageRequest);
+  expire();
+  await assert.rejects(saving, /Timed out/);
+  assert.equal(owned.src, '');
+});
+
+test('a complete visible image is drawn without awaiting decode or changing its src', async () => {
+  const worker = loadWorker();
+  const visible = { src: pageRequest.srcUrl, complete: true, naturalWidth: 4, naturalHeight: 3,
+    decode() { assert.fail('Complete visible image must not await decode'); } };
+  const drawn = mockPage(worker, [visible]);
+  await worker.context.convertFromPageContext(pageRequest);
+  assert.equal(drawn.length, 1);
+  assert.equal(visible.src, pageRequest.srcUrl);
+});
+
+test('page fallback rejects oversized images before allocating a canvas', async () => {
+  const worker = loadWorker();
+  mockPage(worker, [{ src: pageRequest.srcUrl, complete: true, naturalWidth: 9000, naturalHeight: 9000 }]);
+  worker.context.document.createElement = () => assert.fail('Must not allocate canvas');
+  await assert.rejects(worker.context.convertFromPageContext(pageRequest), /64 megapixel/);
+});
+
+test('erasing a download releases its object URL once', async () => {
+  const { context, events, revoked } = loadWorker();
+  await context.startDownload('blob:converted', 'image.png', false);
+  events.downloadErased(1);
+  events.downloadChanged({ id: 1, state: { current: 'complete' } });
+  assert.deepEqual(revoked, ['blob:converted']);
+});
+
+test('malformed settings use defaults while valid quality values are clamped', async () => {
+  const { context, api } = loadWorker();
+  for (const value of [null, false, '', ' ', {}, [], 'invalid', Infinity]) {
+    api.storage.sync.get = async () => ({ jpegQuality: value, webpQuality: value, saveAsDialog: value });
+    const settings = await context.getSettings();
+    assert.equal(settings.jpegQuality, 0.92);
+    assert.equal(settings.webpQuality, 0.9);
+    assert.equal(settings.saveAsDialog, typeof value === 'boolean' ? value : true);
+  }
+  assert.equal(context.normalizeQuality(0, 0.92), 0.1);
+  assert.equal(context.normalizeQuality('0.75', 0.92), 0.75);
+  assert.equal(context.normalizeQuality(2, 0.92), 1);
+});
+
+test('Windows reserved superscript device names are sanitized', () => {
+  const { context } = loadWorker();
+  for (const name of ['COM¹', 'com²', 'COM³.preview', 'LPT¹', 'lpt²', 'LPT³.other']) {
+    assert.equal(context.sanitizeFilename(name), `_${name}`);
+  }
+});
+
+test('interrupted downloads report disk errors, but user cancellation stays quiet', async () => {
+  for (const error of ['FILE_ACCESS_DENIED', 'USER_CANCELED']) {
+    const { context, api, events, revoked } = loadWorker();
+    const titles = [];
+    api.action.setTitle = async ({ title }) => titles.push(title);
+    await context.startDownload('blob:converted', 'image.png', false, 7);
+    events.downloadChanged({ id: 1, state: { current: 'interrupted' }, error: { current: error } });
+    await Promise.resolve();
+    assert.deepEqual(revoked, ['blob:converted']);
+    assert.equal(titles.length, error === 'USER_CANCELED' ? 0 : 1);
+    if (titles.length) assert.match(titles[0], /FILE_ACCESS_DENIED/);
+  }
+});
+
+test('early download interruptions are reported after the ID arrives', async () => {
+  const { context, api } = loadWorker();
+  const titles = [];
+  api.action.setTitle = async ({ title }) => titles.push(title);
+  api.downloads.search = async () => [{ id: 1, state: 'interrupted', error: 'FILE_FAILED' }];
+  await context.startDownload('data:image/png;base64,AA==', 'image.png', false, 7);
+  assert.match(titles[0], /FILE_FAILED/);
+});
+
+test('an older failure timer cannot clear a newer failure badge', async () => {
+  const { context, api } = loadWorker();
+  const timers = [], texts = [];
+  context.setTimeout = (callback) => timers.push(callback);
+  api.action.setBadgeText = async ({ text }) => texts.push(text);
+  await context.showFailureBadge(7, 'first error');
+  await context.showFailureBadge(7, 'second error');
+  timers[0]();
+  assert.deepEqual(texts, ['!', '!']);
+  timers[1]();
+  assert.deepEqual(texts, ['!', '!', '']);
 });

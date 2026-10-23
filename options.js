@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = {
 
 const elements = {
   form: document.getElementById('settings-form'),
+  fields: document.getElementById('settings-fields'),
   jpegQuality: document.getElementById('jpeg-quality'),
   jpegQualityValue: document.getElementById('jpeg-quality-value'),
   webpQuality: document.getElementById('webp-quality'),
@@ -18,16 +19,25 @@ const elements = {
 };
 
 let statusTimeoutId;
+let busy = true;
 
 init().catch((error) => {
   console.error('Unable to initialize settings page.', error);
-  setStatus('Unable to load settings.', true);
+  setStatus('Unable to load settings. Reload this page to try again.', true);
 });
 
 async function init() {
+  setBusy(true);
   bindEvents();
   const settings = await extensionApi.storage.sync.get(DEFAULT_SETTINGS);
   hydrateForm(settings);
+  setBusy(false);
+}
+
+function setBusy(value) {
+  busy = value;
+  elements.fields.disabled = value;
+  elements.form.setAttribute('aria-busy', String(value));
 }
 
 function bindEvents() {
@@ -71,23 +81,36 @@ function updateQualityOutput(input, output) {
 }
 
 async function saveSettings() {
+  if (busy) return;
   const nextSettings = {
     jpegQuality: normalizeQuality(elements.jpegQuality.value, DEFAULT_SETTINGS.jpegQuality),
     webpQuality: normalizeQuality(elements.webpQuality.value, DEFAULT_SETTINGS.webpQuality),
     saveAsDialog: elements.saveAsDialog.checked
   };
 
-  await extensionApi.storage.sync.set(nextSettings);
-  setStatus('Settings saved.');
+  await persistSettings(nextSettings, false);
 }
 
 async function resetSettings() {
-  await extensionApi.storage.sync.set(DEFAULT_SETTINGS);
-  hydrateForm(DEFAULT_SETTINGS);
-  setStatus('Settings reset to defaults.');
+  if (busy) return;
+  await persistSettings(DEFAULT_SETTINGS, true);
+}
+
+async function persistSettings(settings, reset) {
+  setBusy(true);
+  try {
+    await extensionApi.storage.sync.set(settings);
+    if (reset) hydrateForm(settings);
+    setStatus(reset ? 'Settings reset to defaults.' : 'Settings saved.');
+  } finally {
+    setBusy(false);
+  }
 }
 
 function normalizeQuality(value, fallback) {
+  if (!['number', 'string'].includes(typeof value) || (typeof value === 'string' && !value.trim())) {
+    return fallback;
+  }
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue)) {
     return fallback;
@@ -104,6 +127,7 @@ function setStatus(message, isError = false) {
   elements.status.textContent = message;
   elements.status.classList.toggle('error', isError);
   window.clearTimeout(statusTimeoutId);
+  if (isError) return;
   statusTimeoutId = window.setTimeout(() => {
     elements.status.textContent = '';
     elements.status.classList.remove('error');
