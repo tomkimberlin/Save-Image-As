@@ -2,7 +2,7 @@
 
 Save Image As is an open-source Chrome, Edge, and Firefox extension that adds format conversion directly to the image context menu. Right-click an image, choose **Save image as**, and export a converted copy as PNG, JPG, or WebP.
 
-![Native Save image as menu with PNG, JPG, and WebP choices on a local test illustration](docs/context-menu.png)
+![Native Save image as menu with PNG, JPG, and WebP choices on a local test illustration](docs/context-menu.jpg)
 
 The real Chromium context menu, captured from the unpacked extension on an original local test image in a fresh browser profile.
 
