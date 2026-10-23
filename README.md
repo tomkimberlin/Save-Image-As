@@ -2,9 +2,9 @@
 
 Save Image As is an open-source Chrome, Edge, and Firefox extension that adds format conversion directly to the image context menu. Right-click an image, choose **Save image as**, and export a converted copy as PNG, JPG, or WebP.
 
-![Save Image As extension settings with JPG and WebP quality controls and the Save As dialog preference](docs/extension-settings.png)
+![Native Save image as menu with PNG, JPG, and WebP choices on a local test illustration](docs/context-menu.jpg)
 
-The real extension settings page, captured from an unpacked installation in a fresh browser test profile.
+The real Chromium context menu, captured from the unpacked extension on an original local test image in a fresh browser profile.
 
 ## What It Does
 
@@ -43,6 +43,10 @@ The extension includes an options page for:
 - JPG quality
 - WebP quality
 - Toggling the browser's Save As dialog before download
+
+![Save Image As extension settings with JPG and WebP quality controls and the Save As dialog preference](docs/extension-settings.png)
+
+The real extension settings page, captured from the unpacked installation in a fresh browser test profile.
 
 ## Project Structure
 
@@ -92,7 +96,7 @@ npm run test:browser
 
 These tests load the real extension packages into disposable Chromium and Firefox profiles, serve synthetic images from localhost, and inspect downloaded file signatures, dimensions, transparency, JPEG white backgrounds, quality settings, SVG/data/blob sources, iframe/shadow-root fallback, animation snapshots, and failed or stalled sources. Firefox uses its localhost DevTools protocol to install a temporary add-on and exercise the background page. The runtime extension remains dependency-free; test tools and fixtures do not ship in either browser package.
 
-The suite calls the real conversion/download APIs directly. Native context-menu interaction and Save As dialog cancellation still need the manual checks below. It does not test personal browsing data, every website, minimum browser versions, or every operating system. To regenerate the settings screenshot from the real Chromium options page, run `CAPTURE_SCREENSHOT=1 npm run test:browser`.
+The suite calls the real conversion/download APIs directly. Native checks on macOS with Chromium 156 also verified selecting PNG through the context menu and canceling Save As without another dialog or error badge, plus saving JPG with a valid JPEG file signature. Native UI checks remain manual regression checks for other browsers and platforms. The suite does not test personal browsing data, every website, minimum browser versions, or every operating system. To regenerate the settings screenshot from the real Chromium options page, run `CAPTURE_SCREENSHOT=1 npm run test:browser`.
 
 ## Local Install
 
