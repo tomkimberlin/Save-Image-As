@@ -174,6 +174,7 @@ See the full [privacy policy](PRIVACY.md) for the extension's data-handling comm
 - Rapidly changing or highly custom-rendered image surfaces may not be capturable
 - Animated images are treated as static single-frame exports
 - Source/output size and dimension limits may reject unusually large images. Dimension checks happen after native decoding, so they cannot prevent every decoding-related memory cost.
+- Chromium can suspend its background worker during a long Save As dialog or download. The browser still manages the download, but the extension may lose the tab association needed to show a later error badge.
 - Local `file:` images require the browser's file-access setting for the extension to be enabled by the user
 - Some page-context fallbacks can still be blocked by browser canvas security rules when the page itself cannot legally export the selected image
 
