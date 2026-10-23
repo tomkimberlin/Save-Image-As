@@ -29,3 +29,4 @@ web-ext-artifacts/
 # Node tooling
 node_modules/
 coverage/
+test-results/

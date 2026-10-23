@@ -8,6 +8,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,6 +21,14 @@ jobs:
           node --check service-worker.js
           node --check options.js
           node --check popup.js
+          node --check tests/browser/firefox-driver.mjs
+          node --check tests/browser/smoke.test.mjs
+      - name: Install browser test tools
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install isolated test browsers
+        run: npx playwright install --with-deps chromium firefox
+      - name: Browser conversions and downloads
+        run: npm run test:browser
       - name: Prepare browser packages
         run: node scripts/prepare-release.mjs
       - name: Validate Firefox extension

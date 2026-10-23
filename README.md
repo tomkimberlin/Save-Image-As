@@ -2,6 +2,10 @@
 
 Save Image As is an open-source Chrome, Edge, and Firefox extension that adds format conversion directly to the image context menu. Right-click an image, choose **Save image as**, and export a converted copy as PNG, JPG, or WebP.
 
+![Save Image As extension settings with JPG and WebP quality controls and the Save As dialog preference](docs/extension-settings.png)
+
+The real extension settings page, captured from an unpacked installation in a fresh browser test profile.
+
 ## What It Does
 
 Browsers already let people save images, but they usually do not offer format conversion as part of that flow. This extension adds that missing step without requiring a separate editor or design tool.
@@ -30,7 +34,7 @@ Formats such as GIF, TIFF, BMP, and AVIF are intentionally not included by defau
 
 The extension uses browser-specific Manifest V3 files so each browser receives only the background configuration it supports. Chromium browsers load `service-worker.js` as a service worker, while the prepared Firefox package loads the same file through `background.scripts`. For standard image URLs and embedded `data:` images, the extension fetches the source image and converts it inside the extension context before downloading the result. Chromium uses `createImageBitmap` and `OffscreenCanvas`, while Firefox uses a document-backed `<canvas>` in its background page.
 
-For page-scoped `blob:` images, it converts in the selected image's frame. If background decoding fails, as it does for SVG in Chromium, the extension passes the already-fetched image bytes to the page converter. This avoids another network request and allows cross-origin SVG conversion. Slow image requests time out after 20 seconds before trying the page fallback.
+For page-scoped `blob:` images, it converts in the selected image's frame. If background decoding fails, as it does for SVG in Chromium, the extension passes the already-fetched image bytes to the page converter. This avoids another network request and allows cross-origin SVG conversion. Network requests and fallback image loading each have a 20-second deadline. Failed or canceled downloads never restart conversion or open a second Save As dialog.
 
 ## Settings
 
@@ -78,6 +82,18 @@ node scripts/prepare-release.mjs
 npx --yes web-ext@10.6.0 lint --source-dir dist/firefox
 ```
 
+For browser integration tests, install the development tools locally:
+
+```sh
+npm ci --ignore-scripts
+npx playwright install chromium firefox
+npm run test:browser
+```
+
+These tests load the real extension packages into disposable Chromium and Firefox profiles, serve synthetic images from localhost, and inspect downloaded file signatures, dimensions, transparency, JPEG white backgrounds, quality settings, SVG/data/blob sources, iframe/shadow-root fallback, animation snapshots, and failed or stalled sources. Firefox uses its localhost DevTools protocol to install a temporary add-on and exercise the background page. The runtime extension remains dependency-free; test tools and fixtures do not ship in either browser package.
+
+The suite calls the real conversion/download APIs directly. Native context-menu interaction and Save As dialog cancellation still need the manual checks below. It does not test personal browsing data, every website, minimum browser versions, or every operating system. To regenerate the settings screenshot from the real Chromium options page, run `CAPTURE_SCREENSHOT=1 npm run test:browser`.
+
 ## Local Install
 
 ### Firefox
@@ -105,7 +121,7 @@ npx --yes web-ext@10.6.0 lint --source-dir dist/firefox
 
 ## Testing
 
-The automated regression suite uses Node.js 22 or later and requires no dependencies. It covers download cancellation, fallback routing, output format checks, resource cleanup, and filenames. GitHub Actions runs it alongside source checks and Firefox package validation on pushes and pull requests.
+The unit regression suite uses Node.js 22 or later and requires no dependencies. It covers cancellation and later download interruptions, fallback routing and deadlines, source/output/dimension limits, resource cleanup, filenames, settings races and storage failures, and clean browser packaging. GitHub Actions runs it alongside the browser integration suite, source checks, and Firefox package validation on pushes and pull requests.
 
 Recommended manual checks:
 
@@ -120,6 +136,15 @@ Recommended manual checks:
 - Try an SVG hosted on another domain in Chrome and Firefox and confirm each output format is written to disk
 - Cancel the Save As dialog and confirm it stays closed without an error badge
 - Try embedded data images, images inside iframes, and long Unicode filenames
+
+## Changes in 1.1.3
+
+- Stalled fallback loads stop after 20 seconds and release extension-created image requests.
+- Source images are limited to 32 MiB, converted output to 64 MiB, and canvas dimensions to 64 megapixels / 32,767 pixels per side. Oversized conversions fail clearly instead of retrying in the page.
+- Completed, interrupted, or erased downloads release temporary resources. Later disk failures show an error badge; canceled downloads stay quiet.
+- Settings cannot be changed before loading finishes or while a write is pending. Storage errors remain visible, and malformed quality settings use defaults.
+- Windows reserved superscript device names are sanitized, and overlapping failures retain the latest error badge.
+- Added real browser regression tests and a screenshot of the extension.
 
 ## Changes in 1.1.2
 
@@ -148,6 +173,9 @@ See the full [privacy policy](PRIVACY.md) for the extension's data-handling comm
 - Some sites may restrict image access in ways that prevent reliable conversion
 - Rapidly changing or highly custom-rendered image surfaces may not be capturable
 - Animated images are treated as static single-frame exports
+- Source/output size and dimension limits may reject unusually large images. Dimension checks happen after native decoding, so they cannot prevent every decoding-related memory cost.
+- Chromium can suspend its background worker during a long Save As dialog or download. The browser still manages the download, but the extension may lose the tab association needed to show a later error badge.
+- Local `file:` images require the browser's file-access setting for the extension to be enabled by the user
 - Some page-context fallbacks can still be blocked by browser canvas security rules when the page itself cannot legally export the selected image
 
 ## License

@@ -50,7 +50,11 @@ h1 {
   line-height: 1.5;
 }
 
-.settings-form {
+#settings-fields {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
   display: grid;
   gap: 18px;
 }
@@ -110,6 +114,12 @@ button {
 button:hover {
   background: var(--accent-dark);
   transform: translateY(-1px);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+  transform: none;
 }
 
 button:focus-visible,
